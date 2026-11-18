@@ -150,6 +150,32 @@ fn validate_script(text: String) -> Result<script::ScriptSummary, String> {
     Ok(script::summarize(&cues))
 }
 
+/// 导入预览图目录：沙箱/开发用仓库内，正常 release 用应用数据目录
+fn imports_dir(app: &AppHandle) -> PathBuf {
+    let base = dev_webview_data_dir()
+        .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+        .unwrap_or_else(|| data_dir(app));
+    let d = base.join("imports");
+    let _ = fs::create_dir_all(&d);
+    d
+}
+
+/// 导入 pptx：骨架 + 每页 PNG（R9）。COM 调用放独立线程（自己的 STA）
+#[tauri::command]
+fn import_pptx(app: AppHandle, path: String) -> Result<ppt::ImportResult, String> {
+    let dir = imports_dir(&app);
+    std::thread::spawn(move || ppt::import_pptx_blocking(&path, &dir))
+        .join()
+        .map_err(|_| "导入线程崩溃".to_string())?
+}
+
+/// 读译稿文本文件（UTF-8 宽松解码）
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    let bytes = fs::read(&path).map_err(|e| format!("读不了 {}: {e}", path))?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
 // ---------------------------------------------------------------- 浮层窗口
 
 fn target_monitor(
@@ -430,6 +456,7 @@ fn hotkey_specs() -> Vec<(Shortcut, &'static str)> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -462,6 +489,22 @@ pub fn run() {
                     sync_window_flags(app.handle(), &settings);
                 }
             }
+            // S7 自动化验证用：--dev-import <pptx> 启动即导入并打印结果
+            #[cfg(debug_assertions)]
+            if let Some(path) = std::env::args().find(|a| a.ends_with(".pptx")) {
+                let handle = app.handle().clone();
+                let dir = imports_dir(&handle);
+                std::thread::spawn(move || match ppt::import_pptx_blocking(&path, &dir) {
+                    Ok(r) => eprintln!(
+                        "[dev-import] pages={} titles={:?} dir={} script:\n{}",
+                        r.pages,
+                        r.titles.iter().map(|t| t.chars().take(12).collect::<String>()).collect::<Vec<_>>(),
+                        r.dir,
+                        r.script
+                    ),
+                    Err(e) => eprintln!("[dev-import] FAILED: {e}"),
+                });
+            }
             let handle = app.handle().clone();
             for (sc, _) in hotkey_specs() {
                 if let Err(e) = handle.global_shortcut().register(sc) {
@@ -475,6 +518,8 @@ pub fn run() {
             save_store,
             store_location,
             validate_script,
+            import_pptx,
+            read_text_file,
             ensure_overlay,
             show_overlay,
             hide_overlay,

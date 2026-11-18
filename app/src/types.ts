@@ -164,6 +164,19 @@ export function parseScript(text: string): Cue[] {
   return cues;
 }
 
+/** 译稿归一化：`## P6 · 标题` → `=== 6 ===` + 标题注释行（R10 兼容两种页标记，保存统一 ===） */
+export function normalizeDraft(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => {
+      const m = line.match(/^#{1,6}\s*P(\d+)\s*(.*)$/i);
+      if (!m) return line;
+      const title = m[2].replace(/^[·:：\-—\s]+/, "").trim();
+      return `=== ${m[1]} ===` + (title ? `\n# ${title}` : "");
+    })
+    .join("\n");
+}
+
 export function cuesOfPage(cues: Cue[], slide: number): number[] {
   const idx: number[] = [];
   cues.forEach((c, i) => {

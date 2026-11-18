@@ -16,7 +16,7 @@ use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Ole::GetActiveObject;
-use windows::Win32::System::Variant::{VARENUM, VARIANT, VT_DISPATCH, VT_I4};
+use windows::Win32::System::Variant::{VARENUM, VARIANT, VT_BSTR, VT_DISPATCH, VT_I4};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetWindowRect, IsWindowVisible,
 };
@@ -62,7 +62,8 @@ unsafe fn invoke(
     let flags = if args.is_empty() {
         DISPATCH_PROPERTYGET
     } else {
-        DISPATCH_FLAGS(DISPATCH_PROPERTYGET.0 | DISPATCH_METHOD.0)
+        // 带参数 = 方法调用；混入 PROPERTYGET 会让部分 COM 服务端（如 PowerPoint）抛 0x80020009
+        DISPATCH_FLAGS(DISPATCH_METHOD.0)
     };
     let mut result = VARIANT::default();
     disp.Invoke(
@@ -107,6 +108,115 @@ fn var_i32(val: i32) -> VARIANT {
         (*x.Anonymous.Anonymous).Anonymous.lVal = val;
     }
     x
+}
+
+fn var_bstr(s: &str) -> VARIANT {
+    let mut x = VARIANT::default();
+    unsafe {
+        (*x.Anonymous.Anonymous).vt = VT_BSTR;
+        (*x.Anonymous.Anonymous).Anonymous.bstrVal =
+            std::mem::ManuallyDrop::new(windows::core::BSTR::from(s));
+    }
+    x
+}
+
+/// 读一页标题（没有标题占位符的页返回空串）
+unsafe fn slide_title(slide: &IDispatch) -> String {
+    let chain = prop_obj(slide, "Shapes")
+        .and_then(|sh| prop_obj(&sh, "Title"))
+        .and_then(|t| prop_obj(&t, "TextFrame"))
+        .and_then(|tf| prop_obj(&tf, "TextRange"))
+        .and_then(|tr| invoke(&tr, "Text", &[], true));
+    match chain {
+        Ok(v) => {
+            let b = &v.Anonymous.Anonymous.Anonymous.bstrVal;
+            b.to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct ImportResult {
+    pub pages: u32,
+    pub titles: Vec<String>,
+    pub script: String, // 骨架（=== N === + 标题注释）
+    pub dir: String,    // 预览图目录
+}
+
+/// 导入 pptx：COM 打开（只读、无窗口）读页数/标题生成骨架 + 每页导出 PNG（PRD R9）
+/// 导入用的实例：PowerPoint 原本没开就干完活 Quit，原本开着（附着）则不动它
+pub fn import_pptx_blocking(pptx: &str, out_dir: &std::path::Path) -> Result<ImportResult, String> {
+    // PowerPoint 的 COM Open 只认反斜杠路径
+    let pptx = pptx.replace('/', "\\");
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
+        let was_running = find_window("PPTFrameClass").found;
+        let ppt = create_ppt().map_err(|e| format!("无法启动/附着 PowerPoint：{e}"))?;
+        let result = (|| -> Result<ImportResult, String> {
+            let pres_coll = prop_obj(&ppt, "Presentations").map_err(|e| e.to_string())?;
+            // 先无窗口打开（干净）；失败退回带窗口（部分版本/受保护视图不支持无窗口）
+            let opened_invisible = invoke(
+                &pres_coll,
+                "Open",
+                &[var_bstr(&pptx), var_i32(-1), var_i32(0), var_i32(0)],
+                true,
+            )
+            .and_then(|v| to_dispatch(&v));
+            let pres = match opened_invisible {
+                Ok(p) => p,
+                Err(_) => {
+                    let v = invoke(
+                        &pres_coll,
+                        "Open",
+                        &[var_bstr(&pptx), var_i32(-1), var_i32(0), var_i32(-1)],
+                        true,
+                    )
+                    .map_err(|e| format!("PowerPoint 打不开 {pptx}：{e}"))?;
+                    to_dispatch(&v).map_err(|e| format!("PowerPoint 打不开 {pptx}：{e}"))?
+                }
+            };
+            let slides = prop_obj(&pres, "Slides").map_err(|e| e.to_string())?;
+            let count = prop_i32(&slides, "Count").map_err(|e| e.to_string())?;
+            let mut titles = Vec::new();
+            let mut script = format!(
+                "# 导入自 {} · {} 页\n",
+                std::path::Path::new(&pptx)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                count
+            );
+            for i in 1..=count {
+                let slide = item_i32(&slides, i).map_err(|e| e.to_string())?;
+                let title = slide_title(&slide);
+                titles.push(title.clone());
+                script.push_str(&format!("\n=== {} ===\n", i));
+                if !title.is_empty() {
+                    script.push_str(&format!("# {}\n", title));
+                }
+                let png = out_dir.join(format!("slide-{:02}.png", i));
+                invoke(
+                    &slide,
+                    "Export",
+                    &[
+                        var_bstr(&png.to_string_lossy()),
+                        var_bstr("PNG"),
+                        var_i32(1920),
+                        var_i32(1080),
+                    ],
+                    false,
+                )
+                .map_err(|e| format!("第 {} 页导出失败：{}", i, e))?;
+            }
+            let _ = invoke(&pres, "Close", &[], false);
+            Ok(ImportResult { pages: count as u32, titles, script, dir: out_dir.to_string_lossy().to_string() })
+        })();
+        if !was_running {
+            let _ = invoke(&ppt, "Quit", &[], false);
+        }
+        result
+    }
 }
 
 unsafe fn prop_obj(disp: &IDispatch, name: &str) -> windows::core::Result<IDispatch> {

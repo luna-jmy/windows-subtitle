@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Cue,
   DEFAULT_SETTINGS,
   Settings,
   cuesOfPage,
   fromRustSettings,
+  normalizeDraft,
   parseScript,
   toRustSettings,
 } from "./types";
@@ -46,6 +48,7 @@ export default function App() {
   const [liveTick, setLiveTick] = useState(0); // overlay 加载完成后 +1，触发首次 push_page
   const [pbStatus, setPbStatus] = useState<{ index: number; total: number; paused: boolean; atEnd: boolean } | null>(null);
   const [pptLive, setPptLive] = useState(false); // PPT 放映中（COM 轮询）
+  const [notice, setNotice] = useState(""); // 导入等操作的提示条
   const settingsRef = useRef(settings);
 
   settingsRef.current = settings;
@@ -162,6 +165,40 @@ export default function App() {
     invoke("apply_style", { settings: toRustSettings(settingsRef.current) }).catch(console.error);
   }
 
+  // ---------- 导入（R9 骨架+预览图 / R10 译稿） ----------
+  async function importPpt() {
+    try {
+      const path = await openFileDialog({
+        multiple: false,
+        filters: [{ name: "PowerPoint", extensions: ["pptx"] }],
+      });
+      if (!path || typeof path !== "string") return;
+      setNotice("正在导入 PPT（读页数/标题 + 导出预览图）…");
+      const res = await invoke<any>("import_pptx", { path });
+      setScript(res.script);
+      setNotice(`已导入 ${res.pages} 页骨架，预览图在 ${res.dir}`);
+    } catch (e) {
+      console.error(e);
+      setNotice(`导入失败：${e}`);
+    }
+  }
+
+  async function importDraft() {
+    try {
+      const path = await openFileDialog({
+        multiple: false,
+        filters: [{ name: "译稿", extensions: ["md", "txt"] }],
+      });
+      if (!path || typeof path !== "string") return;
+      const text = await invoke<string>("read_text_file", { path });
+      setScript(normalizeDraft(text));
+      setNotice("译稿已导入（## P6 格式已自动转为 === N ===）");
+    } catch (e) {
+      console.error(e);
+      setNotice(`导入失败：${e}`);
+    }
+  }
+
   function pageStep(dir: number) {
     setSlide((v) => Math.max(1, v + dir));
   }
@@ -213,11 +250,22 @@ export default function App() {
           {saved === "saving" ? "保存中…" : "已保存"}
         </div>
         <div className="top-actions">
+          <button className="btn ghost" onClick={importPpt}>
+            导入 PPT
+          </button>
+          <button className="btn ghost" onClick={importDraft}>
+            导入译稿
+          </button>
           <button className="btn ghost" onClick={toggleOverlay}>
             {overlayShown ? "隐藏字幕条" : "显示字幕条"}
           </button>
         </div>
       </header>
+      {notice ? (
+        <div className="notice" onClick={() => setNotice("")}>
+          {notice}（点击关闭）
+        </div>
+      ) : null}
 
       <div className="tabs">
         <button className={tab === "script" ? "tab active" : "tab"} onClick={() => setTab("script")}>
