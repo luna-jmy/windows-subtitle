@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Webview
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 mod script;
+mod ppt;
 
 // ---------------------------------------------------------------- 数据模型
 
@@ -190,6 +191,27 @@ fn place_overlay(app: &AppHandle, settings: &Settings) {
     let Some(win) = app.get_webview_window("overlay") else {
         return;
     };
+    // screen:auto 且 PPT 在放映 → 跟随放映窗所在的屏（R12，旧原型 screenClass 方案）
+    let pick = settings.screen.trim();
+    let auto = pick.is_empty() || pick.eq_ignore_ascii_case("auto") || pick.eq_ignore_ascii_case("ppt");
+    if auto {
+        let show = ppt::PPT_SHOW.lock().unwrap();
+        if let Some(r) = *show {
+            let mons = win.available_monitors().unwrap_or_default();
+            let scale = mons
+                .iter()
+                .find(|m| m.position().x == r.x && m.position().y == r.y)
+                .map(|m| m.scale_factor())
+                .unwrap_or(1.0);
+            let width = (r.w as f64 * settings.width_ratio).round() as u32;
+            let height = overlay_height(settings, scale);
+            let x = r.x + ((r.w as i64 - width as i64) / 2) as i32;
+            let y = r.y + (r.h as f64 * (1.0 - settings.bottom_ratio)).round() as i32 - height as i32;
+            let _ = win.set_size(PhysicalSize::new(width.max(200), height));
+            let _ = win.set_position(PhysicalPosition::new(x, y));
+            return;
+        }
+    }
     let Some(mon) = target_monitor(app, settings) else {
         return;
     };
@@ -422,6 +444,8 @@ pub fn run() {
         .setup(|app| {
             // 窗口在代码里创建（dev 时 WebView2 数据目录指到仓库内，绕开沙箱 AppData 限制）
             build_main_window(app.handle())?;
+            // PowerPoint COM 轮询（R4 跟随翻页 / R12 多屏跟随）
+            ppt::start_polling(app.handle().clone());
             // S1 自动化实测用：--dev-show-overlay 启动即创建并显示字幕条
             #[cfg(debug_assertions)]
             if std::env::args().any(|a| a == "--dev-show-overlay") {

@@ -45,6 +45,7 @@ export default function App() {
   const [tab, setTab] = useState<"script" | "settings">("script");
   const [liveTick, setLiveTick] = useState(0); // overlay 加载完成后 +1，触发首次 push_page
   const [pbStatus, setPbStatus] = useState<{ index: number; total: number; paused: boolean; atEnd: boolean } | null>(null);
+  const [pptLive, setPptLive] = useState(false); // PPT 放映中（COM 轮询）
   const settingsRef = useRef(settings);
 
   settingsRef.current = settings;
@@ -130,7 +131,22 @@ export default function App() {
           setSettings((s) => ({ ...s, clickThrough: !s.clickThrough }))
         ),
         await listen("overlay-ready", () => setLiveTick((t) => t + 1)),
-        await listen<any>("playback-status", (e) => setPbStatus(e.payload))
+        await listen<any>("playback-status", (e) => setPbStatus(e.payload)),
+        // PPT COM 轮询（R4 跟随翻页）：followPpt 开着才跟
+        await listen<any>("ppt-state", (e) => {
+          const { showing, slide } = e.payload;
+          setPptLive(Boolean(showing));
+          if (showing && slide && settingsRef.current.followPpt) {
+            setSlide(Number(slide));
+            applySettings(); // 顺带重算 overlay 位置（跟随放映屏 R12）
+          }
+        }),
+        await listen("ppt-show-end", () => {
+          // 放映结束：字幕条自动隐藏（PRD 边界行为），F7 可再显示
+          setPptLive(false);
+          invoke("hide_overlay").catch(() => {});
+          setOverlayShown(false);
+        })
       );
     };
     reg();
@@ -140,6 +156,10 @@ export default function App() {
 
   function sendCtrl(kind: string, arg = 0) {
     invoke("send_ctrl", { kind, arg }).catch(console.error);
+  }
+
+  function applySettings() {
+    invoke("apply_style", { settings: toRustSettings(settingsRef.current) }).catch(console.error);
   }
 
   function pageStep(dir: number) {
@@ -181,6 +201,12 @@ export default function App() {
         <div className="top-status">
           <span className={`dot ${overlayShown ? "on" : "off"}`} />
           {overlayShown ? "字幕条已显示" : "字幕条未显示"}
+          {pptLive ? (
+            <>
+              <span className="sep">·</span>
+              PPT 放映中
+            </>
+          ) : null}
           <span className="sep">·</span>
           {cues.length} 条 / {totalPages} 页
           <span className="sep">·</span>
