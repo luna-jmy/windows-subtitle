@@ -254,6 +254,7 @@ unsafe fn create_ppt() -> windows::core::Result<IDispatch> {
 struct FindCtx {
     target: &'static str,
     found: bool,
+    hwnd: HWND,
     show_rect: Option<ShowRect>,
 }
 
@@ -264,6 +265,7 @@ unsafe extern "system" fn find_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
     let name = String::from_utf16_lossy(&class[..n as usize]);
     if name == ctx.target && IsWindowVisible(hwnd).as_bool() {
         ctx.found = true;
+        ctx.hwnd = hwnd;
         if name == "screenClass" {
             let mut r = RECT::default();
             if GetWindowRect(hwnd, &mut r).is_ok() {
@@ -289,7 +291,7 @@ unsafe extern "system" fn find_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
 }
 
 fn find_window(target: &'static str) -> FindCtx {
-    let mut ctx = FindCtx { target, found: false, show_rect: None };
+    let mut ctx = FindCtx { target, found: false, hwnd: HWND::default(), show_rect: None };
     unsafe {
         let _ = EnumWindows(Some(find_cb), LPARAM(&mut ctx as *mut _ as isize));
     }
@@ -298,6 +300,106 @@ fn find_window(target: &'static str) -> FindCtx {
 
 fn find_show_monitor() -> Option<ShowRect> {
     find_window("screenClass").show_rect
+}
+
+/// 首个可见目标窗口句柄（screenClass 或其他）
+pub fn find_hwnd(target: &'static str) -> Option<HWND> {
+    let ctx = find_window(target);
+    if ctx.found {
+        Some(ctx.hwnd)
+    } else {
+        None
+    }
+}
+
+// ---- 贴边布局（R16/R17，路线①：SetWindowPos 缩目标窗 + 字幕条贴边） ----
+
+use windows::Win32::UI::WindowsAndMessaging::SetWindowPos;
+use windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER;
+use windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE;
+
+static DOCK_RESTORE: Mutex<Option<(isize, i32, i32, i32, i32)>> = Mutex::new(None);
+
+/// 贴边几何：返回 (目标窗新矩形, 字幕条矩形)，物理像素
+pub fn dock_geometry(
+    mon: (i32, i32, i32, i32),
+    side: &str,
+    ratio: f64,
+) -> ((i32, i32, i32, i32), (i32, i32, i32, i32)) {
+    let (mx, my, mw, mh) = mon;
+    let r = ratio.clamp(0.08, 0.5);
+    match side {
+        "bottom" => {
+            let bar = (mh as f64 * r).round() as i32;
+            ((mx, my, mw, mh - bar), (mx, my + mh - bar, mw, bar))
+        }
+        "left" => {
+            let bar = (mw as f64 * r).round() as i32;
+            ((mx + bar, my, mw - bar, mh), (mx, my, bar, mh))
+        }
+        "right" => {
+            let bar = (mw as f64 * r).round() as i32;
+            ((mx, my, mw - bar, mh), (mx + mw - bar, my, bar, mh))
+        }
+        // 默认 top（PRD：字幕条贴放映窗上方）
+        _ => {
+            let bar = (mh as f64 * r).round() as i32;
+            ((mx, my + bar, mw, mh - bar), (mx, my, mw, bar))
+        }
+    }
+}
+
+unsafe fn set_win_rect(h: HWND, x: i32, y: i32, w: i32, hh: i32) {
+    let _ = SetWindowPos(h, None, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/// 应用布局：dock＝缩目标窗（放映窗优先，其次预览窗）让位 + overlay 贴边整条；
+/// 切回 overlay＝把目标窗恢复全屏。返回字幕条新矩形（物理像素）。
+pub fn apply_dock(app: &tauri::AppHandle, settings: &crate::Settings) -> Option<(i32, i32, i32, i32)> {
+    use tauri::Manager;
+    let mon: (i32, i32, i32, i32);
+    let target: HWND;
+
+    if let (Some(rect), Some(h)) = (find_show_monitor(), find_hwnd("screenClass")) {
+        mon = (rect.x, rect.y, rect.w, rect.h);
+        target = h;
+    } else if let Some(pw) = app.get_webview_window("preview") {
+        let m = pw.current_monitor().ok().flatten()?;
+        let p = m.position();
+        let s = m.size();
+        mon = (p.x, p.y, s.width as i32, s.height as i32);
+        target = pw.hwnd().ok()?;
+    } else {
+        return None;
+    }
+
+    unsafe {
+        if settings.layout == "dock" && settings.ppt_resize {
+            // 记住目标窗原矩形，切回覆盖模式时恢复
+            {
+                let mut rest = DOCK_RESTORE.lock().unwrap();
+                if rest.is_none() || rest.unwrap().0 != target.0 as isize {
+                    let mut r = RECT::default();
+                    if GetWindowRect(target, &mut r).is_ok() {
+                        *rest = Some((target.0 as isize, r.left, r.top, r.right - r.left, r.bottom - r.top));
+                    }
+                }
+            }
+            let (t, bar) = dock_geometry(mon, &settings.dock_side, settings.dock_ratio);
+            set_win_rect(target, t.0, t.1, t.2, t.3);
+            Some(bar)
+        } else {
+            // 覆盖布局：恢复目标窗全屏
+            let mut rest = DOCK_RESTORE.lock().unwrap();
+            if let Some((h, x, y, w, hh)) = *rest {
+                if h == target.0 as isize {
+                    set_win_rect(target, x, y, w, hh);
+                    *rest = None;
+                }
+            }
+            None
+        }
+    }
 }
 
 /// 读放映状态：SlideShowWindows(1).View.Slide.SlideIndex

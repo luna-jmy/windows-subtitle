@@ -4,7 +4,8 @@
   "description": "console + overlay",
   "windows": [
     "main",
-    "overlay"
+    "overlay",
+    "preview"
   ],
   "permissions": [
     "core:default",

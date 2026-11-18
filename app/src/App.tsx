@@ -139,9 +139,13 @@ export default function App() {
         await listen<any>("ppt-state", (e) => {
           const { showing, slide } = e.payload;
           setPptLive(Boolean(showing));
-          if (showing && slide && settingsRef.current.followPpt) {
-            setSlide(Number(slide));
-            applySettings(); // 顺带重算 overlay 位置（跟随放映屏 R12）
+          if (showing) {
+            // 真实放映开始：预览排练窗自动让位（PRD 6.4）
+            invoke("close_preview").catch(() => {});
+            if (slide && settingsRef.current.followPpt) {
+              setSlide(Number(slide));
+              applySettings(); // 顺带重算 overlay 位置（跟随放映屏 R12）
+            }
           }
         }),
         await listen("ppt-show-end", () => {
@@ -256,6 +260,15 @@ export default function App() {
           <button className="btn ghost" onClick={importDraft}>
             导入译稿
           </button>
+          <button
+            className="btn"
+            onClick={async () => {
+              await invoke("open_preview").catch(console.error);
+              if (!overlayShown) await toggleOverlay();
+            }}
+          >
+            ▶ 预览排练
+          </button>
           <button className="btn ghost" onClick={toggleOverlay}>
             {overlayShown ? "隐藏字幕条" : "显示字幕条"}
           </button>
@@ -359,6 +372,46 @@ export default function App() {
           </>
         ) : (
           <section className="settings">
+            <div className="field">
+              <label>布局（R16）</label>
+              <select
+                value={settings.layout}
+                onChange={(e) => setSettings({ ...settings, layout: e.target.value as Settings["layout"] })}
+              >
+                <option value="overlay">覆盖 · 字幕条浮在放映上</option>
+                <option value="dock">贴边 · 放映窗让出一条，字幕不遮挡</option>
+              </select>
+            </div>
+
+            {settings.layout === "dock" ? (
+              <>
+                <div className="field">
+                  <label>字幕条贴哪一侧</label>
+                  <select
+                    value={settings.dockSide}
+                    onChange={(e) => setSettings({ ...settings, dockSide: e.target.value as Settings["dockSide"] })}
+                  >
+                    <option value="top">上（默认，紧贴放映窗上沿）</option>
+                    <option value="bottom">下（像电影字幕）</option>
+                    <option value="left">左</option>
+                    <option value="right">右</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>
+                    字幕条占比 <b>{Math.round(settings.dockRatio * 100)}%</b>
+                  </label>
+                  <input
+                    type="range"
+                    min={8}
+                    max={50}
+                    value={Math.round(settings.dockRatio * 100)}
+                    onChange={(e) => setSettings({ ...settings, dockRatio: Number(e.target.value) / 100 })}
+                  />
+                </div>
+              </>
+            ) : null}
+
             <div className="field">
               <label>推进模式（运行中可切）</label>
               <select
