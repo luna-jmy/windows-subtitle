@@ -20,12 +20,17 @@ export type Settings = {
   dockRatio: number;
   pptResize: boolean;
   showEn: boolean;
-  clickThrough: boolean;
+  clickThrough: boolean; // 穿透（默认关，Ctrl+Alt+X 临时切换）
   alwaysOnTop: boolean;
   screen: string;
   followPpt: boolean;
   minimizeToTray: boolean;
   align: "center" | "left"; // UI 额外项
+  textOnly: boolean; // 仅文字字幕（无背景板），2026-11-19 用户反馈新增
+  // 字幕条自定义位置（预览里拖动产生；null = 默认底部居中）
+  // 值为字幕条左上角相对屏幕宽高的比例（0..1），真实播放用同一比例落位（PRD 硬伤①）
+  posX: number | null;
+  posY: number | null;
 };
 
 export type Store = {
@@ -61,12 +66,15 @@ export const DEFAULT_SETTINGS: Settings = {
   dockRatio: 0.18,
   pptResize: true,
   showEn: false,
-  clickThrough: true,
+  clickThrough: false,
   alwaysOnTop: true,
   screen: "auto",
   followPpt: true,
   minimizeToTray: true,
   align: "center",
+  textOnly: false,
+  posX: null,
+  posY: null,
 };
 
 /** Rust snake_case → 前端 camelCase（缺字段用默认值兜底，兼容旧 store.json） */
@@ -99,6 +107,9 @@ export function fromRustSettings(raw: any): Settings {
     followPpt: raw?.follow_ppt ?? d.followPpt,
     minimizeToTray: raw?.minimize_to_tray ?? d.minimizeToTray,
     align: (raw?.align as Settings["align"]) ?? d.align,
+    textOnly: raw?.text_only ?? d.textOnly,
+    posX: typeof raw?.pos_x === "number" ? raw.pos_x : null,
+    posY: typeof raw?.pos_y === "number" ? raw.pos_y : null,
   };
 }
 
@@ -130,6 +141,9 @@ export function toRustSettings(s: Settings) {
     follow_ppt: s.followPpt,
     minimize_to_tray: s.minimizeToTray,
     align: s.align,
+    text_only: s.textOnly,
+    pos_x: s.posX,
+    pos_y: s.posY,
   };
 }
 

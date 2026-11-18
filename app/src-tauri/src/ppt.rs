@@ -12,8 +12,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, CLSIDFromProgID, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPPARAMS,
-    COINIT_APARTMENTTHREADED,
+    IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT,
+    DISPPARAMS, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Ole::GetActiveObject;
 use windows::Win32::System::Variant::{VARENUM, VARIANT, VT_BSTR, VT_DISPATCH, VT_I4};
@@ -31,18 +31,26 @@ pub struct ShowRect {
 }
 
 pub static PPT_SHOW: Mutex<Option<ShowRect>> = Mutex::new(None);
+/// 最近导入/打开的 pptx（「打开 PPT」/「断开挂载」用）
+pub static LAST_PPTX: Mutex<Option<String>> = Mutex::new(None);
+static DETACH_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 断开挂载：轮询线程下个周期关掉我们挂的 deck、停止跟随
+pub fn request_detach() {
+    DETACH_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-unsafe fn get_id(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
+unsafe fn get_id(disp: &IDispatch, name: &str) -> windows::core::Result<i32> { unsafe {
     let w = wide(name);
     let names = [PCWSTR(w.as_ptr())];
     let mut ids = [0i32];
     disp.GetIDsOfNames(&GUID::zeroed(), names.as_ptr(), 1, 0x0409, ids.as_mut_ptr())?;
     Ok(ids[0])
-}
+}}
 
 /// 晚绑定调用/取属性：args 为位置参数（自动按 Invoke 要求倒序）
 unsafe fn invoke(
@@ -50,7 +58,7 @@ unsafe fn invoke(
     name: &str,
     args: &[VARIANT],
     _want_result: bool,
-) -> windows::core::Result<VARIANT> {
+) -> windows::core::Result<VARIANT> { unsafe {
     let id = get_id(disp, name)?;
     let mut store: Vec<VARIANT> = args.to_vec();
     store.reverse();
@@ -77,21 +85,21 @@ unsafe fn invoke(
         None,
     )?;
     Ok(result)
-}
+}}
 
-unsafe fn vt(v: &VARIANT) -> VARENUM {
+unsafe fn vt(v: &VARIANT) -> VARENUM { unsafe {
     v.Anonymous.Anonymous.vt
-}
+}}
 
-unsafe fn to_i32(v: &VARIANT) -> windows::core::Result<i32> {
+unsafe fn to_i32(v: &VARIANT) -> windows::core::Result<i32> { unsafe {
     if vt(v) == VT_I4 {
         Ok(v.Anonymous.Anonymous.Anonymous.lVal)
     } else {
         Err(windows::core::Error::from(windows::core::HRESULT(-1)))
     }
-}
+}}
 
-unsafe fn to_dispatch(v: &VARIANT) -> windows::core::Result<IDispatch> {
+unsafe fn to_dispatch(v: &VARIANT) -> windows::core::Result<IDispatch> { unsafe {
     let err = || windows::core::Error::from(windows::core::HRESULT(-1));
     if vt(v) == VT_DISPATCH {
         let d = &v.Anonymous.Anonymous.Anonymous.pdispVal;
@@ -99,7 +107,7 @@ unsafe fn to_dispatch(v: &VARIANT) -> windows::core::Result<IDispatch> {
     } else {
         Err(err())
     }
-}
+}}
 
 fn var_i32(val: i32) -> VARIANT {
     let mut x = VARIANT::default();
@@ -120,8 +128,52 @@ fn var_bstr(s: &str) -> VARIANT {
     x
 }
 
+/// 可见地打开最近导入的 PPT（用户显式操作；不动跟随逻辑）
+pub fn open_pptx_blocking(pptx: &str) -> Result<(), String> {
+    let pptx = pptx.replace('/', "\\");
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let ppt = create_ppt().map_err(|e| format!("无法启动/附着 PowerPoint：{e}"))?;
+        let _ = invoke_put(&ppt, "Visible", var_i32(-1));
+        let pres_coll = prop_obj(&ppt, "Presentations").map_err(|e| e.to_string())?;
+        invoke(
+            &pres_coll,
+            "Open",
+            &[var_bstr(&pptx), var_i32(-1), var_i32(0), var_i32(-1)],
+            false,
+        )
+        .map_err(|e| format!("PowerPoint 打不开 {pptx}：{e}"))?;
+        let _ = invoke_put(&ppt, "WindowState", var_i32(3)); // ppWindowMaximized
+        Ok(())
+    }
+}
+
+/// 备注长段拆成字幕条：按句末标点切分、短句合并到 ~60 字符（中英混排通用）
+fn split_note_lines(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let push = |buf: &mut String, out: &mut Vec<String>| {
+        let t = buf.trim();
+        if !t.is_empty() {
+            out.push(t.to_string());
+        }
+        buf.clear();
+    };
+    for ch in text.chars() {
+        buf.push(ch);
+        let sentence_end = matches!(ch, '.' | '!' | '?' | '。' | '！' | '？' | ';' | '；');
+        if sentence_end && buf.chars().count() >= 20 {
+            push(&mut buf, &mut out);
+        } else if buf.chars().count() >= 60 {
+            push(&mut buf, &mut out);
+        }
+    }
+    push(&mut buf, &mut out);
+    out
+}
+
 /// 读一页标题（没有标题占位符的页返回空串）
-unsafe fn slide_title(slide: &IDispatch) -> String {
+unsafe fn slide_title(slide: &IDispatch) -> String { unsafe {
     let chain = prop_obj(slide, "Shapes")
         .and_then(|sh| prop_obj(&sh, "Title"))
         .and_then(|t| prop_obj(&t, "TextFrame"))
@@ -134,7 +186,25 @@ unsafe fn slide_title(slide: &IDispatch) -> String {
         }
         Err(_) => String::new(),
     }
-}
+}}
+
+/// 读一页的演讲者备注（NotesPage 正文占位符；内容源是它，不是标题）
+unsafe fn slide_notes(slide: &IDispatch) -> String { unsafe {
+    let chain = prop_obj(slide, "NotesPage")
+        .and_then(|np| prop_obj(&np, "Shapes"))
+        .and_then(|sh| prop_obj(&sh, "Placeholders"))
+        .and_then(|ph| item_i32(&ph, 2))
+        .and_then(|p2| prop_obj(&p2, "TextFrame"))
+        .and_then(|tf| prop_obj(&tf, "TextRange"))
+        .and_then(|tr| invoke(&tr, "Text", &[], true));
+    match chain {
+        Ok(v) => {
+            let b = &v.Anonymous.Anonymous.Anonymous.bstrVal;
+            b.to_string().replace('\r', "\n")
+        }
+        Err(_) => String::new(),
+    }
+}}
 
 #[derive(serde::Serialize)]
 pub struct ImportResult {
@@ -150,7 +220,7 @@ pub fn import_pptx_blocking(pptx: &str, out_dir: &std::path::Path) -> Result<Imp
     // PowerPoint 的 COM Open 只认反斜杠路径
     let pptx = pptx.replace('/', "\\");
     unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let was_running = find_window("PPTFrameClass").found;
         let ppt = create_ppt().map_err(|e| format!("无法启动/附着 PowerPoint：{e}"))?;
         let result = (|| -> Result<ImportResult, String> {
@@ -173,7 +243,12 @@ pub fn import_pptx_blocking(pptx: &str, out_dir: &std::path::Path) -> Result<Imp
                         true,
                     )
                     .map_err(|e| format!("PowerPoint 打不开 {pptx}：{e}"))?;
-                    to_dispatch(&v).map_err(|e| format!("PowerPoint 打不开 {pptx}：{e}"))?
+                    let p = to_dispatch(&v).map_err(|e| format!("PowerPoint 打不开 {pptx}：{e}"))?;
+                    // 只最小化我们自己拉起的实例；附着到用户已开的 PowerPoint 时不碰他窗口
+                    if !was_running {
+                        let _ = invoke_put(&ppt, "WindowState", var_i32(2)); // ppWindowMinimized
+                    }
+                    p
                 }
             };
             let slides = prop_obj(&pres, "Slides").map_err(|e| e.to_string())?;
@@ -195,6 +270,11 @@ pub fn import_pptx_blocking(pptx: &str, out_dir: &std::path::Path) -> Result<Imp
                 if !title.is_empty() {
                     script.push_str(&format!("# {}\n", title));
                 }
+                // 内容源 = 演讲者备注；长段按句拆成多条字幕（一段一句，~60 字/条）
+                for line in split_note_lines(&slide_notes(&slide)) {
+                    script.push_str(&line);
+                    script.push('\n');
+                }
                 let png = out_dir.join(format!("slide-{:02}.png", i));
                 invoke(
                     &slide,
@@ -210,6 +290,7 @@ pub fn import_pptx_blocking(pptx: &str, out_dir: &std::path::Path) -> Result<Imp
                 .map_err(|e| format!("第 {} 页导出失败：{}", i, e))?;
             }
             let _ = invoke(&pres, "Close", &[], false);
+            *LAST_PPTX.lock().unwrap() = Some(pptx.clone());
             Ok(ImportResult { pages: count as u32, titles, script, dir: out_dir.to_string_lossy().to_string() })
         })();
         if !was_running {
@@ -219,22 +300,45 @@ pub fn import_pptx_blocking(pptx: &str, out_dir: &std::path::Path) -> Result<Imp
     }
 }
 
-unsafe fn prop_obj(disp: &IDispatch, name: &str) -> windows::core::Result<IDispatch> {
+unsafe fn prop_obj(disp: &IDispatch, name: &str) -> windows::core::Result<IDispatch> { unsafe {
     to_dispatch(&invoke(disp, name, &[], true)?)
-}
+}}
 
-unsafe fn prop_i32(disp: &IDispatch, name: &str) -> windows::core::Result<i32> {
+unsafe fn prop_i32(disp: &IDispatch, name: &str) -> windows::core::Result<i32> { unsafe {
     to_i32(&invoke(disp, name, &[], true)?)
-}
+}}
 
-unsafe fn item_i32(coll: &IDispatch, idx: i32) -> windows::core::Result<IDispatch> {
+/// 属性赋值（DISPID_PROPERTYPUT）
+unsafe fn invoke_put(disp: &IDispatch, name: &str, arg: VARIANT) -> windows::core::Result<()> { unsafe {
+    let id = get_id(disp, name)?;
+    let mut store = [arg];
+    let mut dispid_put = -3i32; // DISPID_PROPERTYPUT
+    let mut dp = DISPPARAMS::default();
+    dp.rgvarg = store.as_mut_ptr();
+    dp.cArgs = 1;
+    dp.rgdispidNamedArgs = &mut dispid_put;
+    dp.cNamedArgs = 1;
+    disp.Invoke(
+        id,
+        &GUID::zeroed(),
+        0x0409,
+        DISPATCH_FLAGS(DISPATCH_PROPERTYPUT.0),
+        &dp,
+        None,
+        None,
+        None,
+    )?;
+    Ok(())
+}}
+
+unsafe fn item_i32(coll: &IDispatch, idx: i32) -> windows::core::Result<IDispatch> { unsafe {
     let arg = var_i32(idx);
     to_dispatch(&invoke(coll, "Item", &[arg], true)?)
-}
+}}
 
 /// 创建/附着 PowerPoint：GetActiveObject 优先（真实机器标准路径），
 /// 沙箱里 ROT 不可见则 CoCreateInstance 兜底（PowerPoint 单例；沙箱例外见 poll_loop 注释）
-unsafe fn create_ppt() -> windows::core::Result<IDispatch> {
+unsafe fn create_ppt() -> windows::core::Result<IDispatch> { unsafe {
     let prog = wide("PowerPoint.Application");
     let clsid = CLSIDFromProgID(PCWSTR(prog.as_ptr()))?;
     let mut punk: Option<windows::core::IUnknown> = None;
@@ -247,7 +351,7 @@ unsafe fn create_ppt() -> windows::core::Result<IDispatch> {
     }
     let unk: windows::core::IUnknown = CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER)?;
     unk.cast()
-}
+}}
 
 // ---- 窗口探测（PPTFrameClass = PowerPoint 主窗口；screenClass = 放映窗） ----
 
@@ -258,7 +362,7 @@ struct FindCtx {
     show_rect: Option<ShowRect>,
 }
 
-unsafe extern "system" fn find_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+unsafe extern "system" fn find_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL { unsafe {
     let ctx = &mut *(lparam.0 as *mut FindCtx);
     let mut class = [0u16; 32];
     let n = GetClassNameW(hwnd, &mut class);
@@ -288,7 +392,7 @@ unsafe extern "system" fn find_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
         return windows::core::BOOL(0);
     }
     windows::core::BOOL(1)
-}
+}}
 
 fn find_window(target: &'static str) -> FindCtx {
     let mut ctx = FindCtx { target, found: false, hwnd: HWND::default(), show_rect: None };
@@ -349,9 +453,9 @@ pub fn dock_geometry(
     }
 }
 
-unsafe fn set_win_rect(h: HWND, x: i32, y: i32, w: i32, hh: i32) {
+unsafe fn set_win_rect(h: HWND, x: i32, y: i32, w: i32, hh: i32) { unsafe {
     let _ = SetWindowPos(h, None, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
-}
+}}
 
 /// 应用布局：dock＝缩目标窗（放映窗优先，其次预览窗）让位 + overlay 贴边整条；
 /// 切回 overlay＝把目标窗恢复全屏。返回字幕条新矩形（物理像素）。
@@ -404,7 +508,7 @@ pub fn apply_dock(app: &tauri::AppHandle, settings: &crate::Settings) -> Option<
 
 /// 读放映状态：SlideShowWindows(1).View.Slide.SlideIndex
 /// 最后页再 Next 后 View.Slide 抛"Invalid request"（PRD 4.4），此时返回 (true, None) 保持上一次页码
-unsafe fn ppt_walk(ppt: &IDispatch) -> windows::core::Result<(bool, Option<u32>)> {
+unsafe fn ppt_walk(ppt: &IDispatch) -> windows::core::Result<(bool, Option<u32>)> { unsafe {
     let wins = prop_obj(ppt, "SlideShowWindows")?;
     let count = to_i32(&invoke(&wins, "Count", &[], true)?)?;
     if count <= 0 {
@@ -419,7 +523,7 @@ unsafe fn ppt_walk(ppt: &IDispatch) -> windows::core::Result<(bool, Option<u32>)
         }
         Err(_) => Ok((true, None)),
     }
-}
+}}
 
 /// 轮询主循环：状态变化时发事件；放映窗矩形持续更新全局（place_overlay 用）
 fn poll_loop(app: AppHandle) {
@@ -432,6 +536,40 @@ fn poll_loop(app: AppHandle) {
     let mut wrong_instance_note = false;
     loop {
         std::thread::sleep(Duration::from_millis(250));
+
+        // 断开挂载请求：关掉我们挂的 deck（按路径匹配，不动用户其他文件）、停止跟随
+        if DETACH_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let target = LAST_PPTX.lock().unwrap().clone().map(|p| p.replace('/', "\\").to_lowercase());
+            if let Some(ppt) = cached.take() {
+                unsafe {
+                    if let (Some(want), Ok(coll)) = (target.clone(), prop_obj(&ppt, "Presentations")) {
+                        if let Ok(count) = prop_i32(&coll, "Count") {
+                            for i in (1..=count).rev() {
+                                if let Ok(p) = item_i32(&coll, i) {
+                                    if let Ok(v) = invoke(&p, "FullName", &[], true) {
+                                        let b = &v.Anonymous.Anonymous.Anonymous.bstrVal;
+                                        if b.to_string().replace('/', "\\").to_lowercase() == want {
+                                            let _ = invoke(&p, "Close", &[], false);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            *LAST_PPTX.lock().unwrap() = None;
+            *PPT_SHOW.lock().unwrap() = None;
+            eprintln!("[ppt] detached");
+            let _ = app.emit(
+                "ppt-state",
+                serde_json::json!({ "showing": false, "slide": null }),
+            );
+            let _ = app.emit("ppt-detached", ());
+            was_showing = false;
+            last_slide = None;
+            continue;
+        }
 
         // PowerPoint 主窗口不在了就丢弃缓存实例（放映结束/关掉 PowerPoint）
         if !find_window("PPTFrameClass").found {

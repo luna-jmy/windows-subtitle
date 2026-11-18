@@ -117,6 +117,8 @@ pub fn parse_script(text: &str) -> Result<Vec<ScriptCue>, ScriptError> {
 }
 
 /// 序列化：连续同页的条目归到一个页标记下；与 parse_script 互为往返
+/// （导出/保存工程稿时用；暂无调用方，保留工具函数）
+#[allow(dead_code)]
 pub fn serialize_script(cues: &[ScriptCue]) -> String {
     let mut out = String::from("# 桌面字幕器字幕稿（一行=一条；=== N === 分页；EN: 附英文）\n");
     let mut cur: Option<(u32, u32)> = None;

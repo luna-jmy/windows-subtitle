@@ -1,23 +1,19 @@
 // 字幕条窗口：播放状态机自治（PRD 6.2/6.3 模式矩阵）
 // 滚动模式：整段连续上滚，滚完停末行；逐条模式：F9/F8 逐条推进
+// 视觉渲染走共享 BarView（与主界面预览同一份标记，硬伤①②）
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { DEFAULT_SETTINGS, fromRustSettings, Settings } from "./types";
+import { BarView } from "./subbar";
 import "./overlay.css";
 
 type PageCue = { zh: string; en: string | null };
 type PageEvent = { page: number; cues: PageCue[] };
 type CtrlEvent = { kind: string; arg: number };
 type Status = { page: number; index: number; total: number; paused: boolean; advance: string; atEnd: boolean };
-
-function hexToRgba(hex: string, alpha255: number): string {
-  const m = hex.replace("#", "");
-  const n = parseInt(m.length === 3 ? m.split("").map((c) => c + c).join("") : m, 16);
-  const a = Math.round((alpha255 / 255) * 100) / 100;
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
-}
 
 function Overlay() {
   const [page, setPage] = useState(1);
@@ -35,7 +31,6 @@ function Overlay() {
 
   const lineHeight = s.fontSize * 1.5;
   const isScroll = s.advance === "scroll";
-  const stepBasis = Math.round(lineHeight * s.lines);
 
   // ---------- 事件接入 ----------
   useEffect(() => {
@@ -78,6 +73,47 @@ function Overlay() {
     })();
     return () => un.forEach((f) => f());
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---------- 拖动落位持久化（硬伤①）：字幕条被用户拖动后，把新位置（屏比例）回给主界面 ----------
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // 只有用户按下拖动区（data-tauri-drag-region）触发的 OS 拖拽才上报；
+    // Rust 侧 place_overlay 的程序化移动不算（否则恢复默认位置会被回写覆盖，成环）
+    const osDragRef = { active: false };
+    const onMouseDown = (e: MouseEvent) => {
+      if ((e.target as HTMLElement)?.hasAttribute?.("data-tauri-drag-region")) {
+        osDragRef.active = true;
+      }
+    };
+    window.addEventListener("mousedown", onMouseDown, true);
+    // onMoved 在 OS 拖拽中连发；防抖 250ms = 拖拽停稳后再上报
+    const unMove = win.onMoved(() => {
+      if (!osDragRef.active) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        osDragRef.active = false;
+        try {
+          const pos = await win.outerPosition();
+          const mon = await currentMonitor();
+          if (!mon || mon.size.width === 0 || mon.size.height === 0) return;
+          const x = (pos.x - mon.position.x) / mon.size.width;
+          const y = (pos.y - mon.position.y) / mon.size.height;
+          emit("bar-moved", {
+            x: Math.max(0, Math.min(1, x)),
+            y: Math.max(0, Math.min(1, y)),
+          }).catch(() => {});
+        } catch {
+          // 窗口销毁中忽略
+        }
+      }, 250);
+    });
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown, true);
+      if (timer) clearTimeout(timer);
+      unMove.then((f) => f()).catch(() => {});
+    };
   }, []);
 
   // ---------- 播放控制 ----------
@@ -159,61 +195,29 @@ function Overlay() {
     if (!el) return;
     const pad2 = s.padding * 2 + (s.showEn ? Math.round(s.enSize * 1.5) : 0);
     const used = Math.round(el.scrollHeight);
-    const basis = stepBasis;
+    const basis = Math.round(lineHeight * s.lines);
     const cap = Math.round(lineHeight * 5);
     const want = Math.round(Math.max(basis, Math.min(used, cap)) + pad2);
     invoke("set_overlay_height", { height: want }).catch(() => {});
-  }, [cues, stepIndex, s.fontSize, s.lines, s.padding, s.showEn, s.enSize, stepBasis, lineHeight]);
+  }, [cues, stepIndex, s.fontSize, s.lines, s.padding, s.showEn, s.enSize, lineHeight]);
 
   const empty = cues.length === 0; // 无字幕页：底板保留、文字清空（PRD 边界行为）
-  const current = !isScroll ? cues[Math.min(stepIndex, cues.length - 1)] : null;
 
   return (
     <div className="overlay-root" data-advance={s.advance}>
-      <div
-        className={`bar ${empty ? "empty" : ""} ${paused && !empty ? "paused" : ""}`}
-        data-align={s.align}
-        data-tauri-drag-region
-        style={{
-          background: hexToRgba(s.bgColor, s.bgAlpha),
-          borderRadius: s.radius,
-          padding: s.padding,
-          fontFamily: `"${s.fontFamily}", sans-serif`,
-          color: s.fg,
-        }}
-      >
-        {empty ? (
-          <div className="viewport" ref={viewRef} style={{ height: stepBasis }} />
-        ) : isScroll ? (
-          <div className="viewport" ref={viewRef} style={{ height: stepBasis }}>
-            <div
-              className="roll"
-              ref={rollRef}
-              style={{ transform: `translateY(${-Math.round(offset)}px)`, fontSize: s.fontSize, lineHeight: 1.5 }}
-            >
-              {cues.map((c, i) => (
-                <p key={i} className="cue">
-                  {c.zh}
-                  {s.showEn && c.en ? (
-                    <span className="en" style={{ fontSize: s.enSize }}>{c.en}</span>
-                  ) : null}
-                </p>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="viewport" ref={viewRef}>
-            <div className="roll" style={{ fontSize: s.fontSize, lineHeight: 1.5 }}>
-              <p className="cue">
-                {current?.zh}
-                {s.showEn && current?.en ? (
-                  <span className="en" style={{ fontSize: s.enSize }}>{current.en}</span>
-                ) : null}
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
+      <BarView
+        settings={s}
+        cues={cues}
+        mode={isScroll ? "scroll" : "step"}
+        stepIndex={stepIndex}
+        offset={offset}
+        paused={paused}
+        empty={empty}
+        scale={1}
+        dragRegion
+        viewRef={viewRef}
+        rollRef={rollRef}
+      />
       {atEnd && isScroll && !empty ? <div className="endmark" title="已滚到本页末尾" /> : null}
     </div>
   );

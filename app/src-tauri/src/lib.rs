@@ -38,6 +38,12 @@ pub struct Settings {
     pub follow_ppt: bool,
     pub minimize_to_tray: bool,
     pub align: String, // UI 额外项（文字对齐），PRD 5.0 之外
+    // 仅文字字幕（无背景板），2026-11-19 用户反馈新增
+    pub text_only: bool,
+    // 字幕条自定义位置（预览/字幕条上拖动产生；None = 默认底部居中）。
+    // 值 = 字幕条左上角相对所在屏宽高的比例（0..1），与前端预览共用同一落位公式（硬伤①）
+    pub pos_x: Option<f64>,
+    pub pos_y: Option<f64>,
 }
 
 impl Default for Settings {
@@ -63,12 +69,17 @@ impl Default for Settings {
             dock_ratio: 0.18,
             ppt_resize: true,
             show_en: false,
-            click_through: true,
             always_on_top: true,
             screen: "auto".into(),
             follow_ppt: true,
             minimize_to_tray: true,
             align: "center".into(),
+            text_only: false,
+            // 2026-11-19：穿透默认改关（用户反馈：穿透会把点击传给下层放映画面导致误翻页，
+            // 字幕条应默认可拖动；需要穿透用 Ctrl+Alt+X 热键临时开）
+            click_through: false,
+            pos_x: None,
+            pos_y: None,
         }
     }
 }
@@ -128,6 +139,9 @@ fn load_store(app: AppHandle) -> Store {
     if store.script.trim().is_empty() {
         store.script = SAMPLE_SCRIPT.to_string();
     }
+    // 2026-11-19 迁移：旧版本把穿透默认 true 写进了 store；现在默认关（字幕条可拖动优先）。
+    // 穿透降级为热键临时开关（Ctrl+Alt+X），重启回到默认关。
+    store.settings.click_through = false;
     store
 }
 
@@ -160,13 +174,16 @@ fn imports_dir(app: &AppHandle) -> PathBuf {
     d
 }
 
-/// 导入 pptx：骨架 + 每页 PNG（R9）。COM 调用放独立线程（自己的 STA）
+/// 导入 pptx：骨架 + 每页 PNG（R9）。
+/// 注意：Tauri v2 同步命令跑在主线程，COM 导入耗时几十秒——必须 async + spawn_blocking，
+/// 否则主线程被 join 卡死，全部 invoke/热键假死（2026-11-18 踩过）
 #[tauri::command]
-fn import_pptx(app: AppHandle, path: String) -> Result<ppt::ImportResult, String> {
+async fn import_pptx(app: AppHandle, path: String) -> Result<ppt::ImportResult, String> {
     let dir = imports_dir(&app);
-    std::thread::spawn(move || ppt::import_pptx_blocking(&path, &dir))
-        .join()
-        .map_err(|_| "导入线程崩溃".to_string())?
+    let r = tauri::async_runtime::spawn_blocking(move || ppt::import_pptx_blocking(&path, &dir))
+        .await
+        .map_err(|e| format!("导入任务失败：{e}"))?;
+    r
 }
 
 /// 读译稿文本文件（UTF-8 宽松解码）
@@ -177,8 +194,9 @@ fn read_text_file(path: String) -> Result<String, String> {
 }
 
 /// 预览排练（R14）：幻灯片预览窗，最大化、无边框，放导入的页面图片
+/// （async：同 ensure_overlay，命令里建窗口必须 async，否则主线程自锁）
 #[tauri::command]
-fn open_preview(app: AppHandle) -> Result<(), String> {
+async fn open_preview(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("preview") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -202,16 +220,52 @@ fn close_preview(app: AppHandle) {
     }
 }
 
-/// 预览图：imports/slide-NN.png → data URL
+/// 可见地打开最近导入的 PPT（显式按钮，导入不再顺带打开）
 #[tauri::command]
-fn read_preview_image(app: AppHandle, page: u32) -> Option<String> {
+async fn open_last_ppt() -> Result<(), String> {
+    let path = ppt::LAST_PPTX.lock().unwrap().clone();
+    let Some(path) = path else {
+        return Err("还没有导入过 PPT（先点「导入 PPT」）".into());
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = ppt::open_pptx_blocking(&path) {
+            eprintln!("[ppt] open: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// 断开 PPT 挂载：关掉我们挂的 deck、停止跟随，方便换下一个 PPT。
+/// 硬伤③：同时删掉本次导入的预览图，不留后台垃圾（导入时才重新生成）
+#[tauri::command]
+fn detach_ppt(app: AppHandle) {
+    ppt::request_detach();
+    let dir = imports_dir(&app);
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().map(|x| x == "png").unwrap_or(false) {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+}
+
+/// 预览图：imports/slide-NN.png → data URL（图片编码放线程池，别占主线程）
+#[tauri::command]
+async fn read_preview_image(app: AppHandle, page: u32) -> Option<String> {
     let path = imports_dir(&app).join(format!("slide-{:02}.png", page));
-    let bytes = fs::read(path).ok()?;
-    use base64::Engine;
-    Some(format!(
-        "data:image/png;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    ))
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(path).ok()?;
+        use base64::Engine;
+        Some(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 // ---------------------------------------------------------------- 浮层窗口
@@ -251,13 +305,41 @@ fn overlay_height(settings: &Settings, scale: f64) -> u32 {
     ((base + extra) * scale).round().max(60.0) as u32
 }
 
+/// 字幕条落位公式（唯一来源，前端预览 subbar.tsx 的 previewWinRect 与此逐行对应，硬伤①②）：
+/// 默认 = 宽度 width_ratio×屏宽、水平居中、底部按 bottom_ratio 抬高；
+/// 预览里拖动过（pos_x/pos_y 有值）= 左上角按比例直接落位，宽度仍按 width_ratio。
+/// 返回 (x, y, w, h)，物理像素。
+fn bar_rect(settings: &Settings, rx: i32, ry: i32, rw: i32, rh: i32, scale: f64) -> (i32, i32, u32, u32) {
+    let width = ((rw as f64) * settings.width_ratio).round() as u32;
+    // R18 内容自报高度优先（overlay 折行超行会长高），否则用基础公式；
+    // 落位 y 用全高计算，保证长高后底部仍在屏内（2026-11-19 修：此前长高只改尺寸不移位，下半截顶出屏）
+    let reported = LAST_BAR_HEIGHT.lock().unwrap().to_owned();
+    let height = reported.unwrap_or_else(|| overlay_height(settings, scale));
+    let (x, y) = if let (Some(px), Some(py)) = (settings.pos_x, settings.pos_y) {
+        let px = px.clamp(0.0, 1.0);
+        let py = py.clamp(0.0, 1.0);
+        let x = rx + (rw as f64 * px).round() as i32;
+        let y = ry + (rh as f64 * py).round() as i32;
+        // 钳制在所在屏内
+        (
+            x.min(rx + rw - width.max(200) as i32).max(rx),
+            y.min(ry + rh - height as i32).max(ry),
+        )
+    } else {
+        (
+            rx + ((rw as i64 - width as i64) / 2) as i32,
+            ry + (rh as f64 * (1.0 - settings.bottom_ratio)).round() as i32 - height as i32,
+        )
+    };
+    (x, y, width.max(200), height)
+}
+
 fn place_overlay(app: &AppHandle, settings: &Settings) {
     let Some(win) = app.get_webview_window("overlay") else {
         return;
     };
-    if settings.layout == "dock" {
-        return; // 贴边模式的几何由 apply_dock 负责
-    }
+    // 注意：贴边模式下也走这里做底部条定位（兜底）——
+    // 没有放映窗/预览窗可贴时，apply_dock 返回 None，字幕条至少落在屏幕底部可见
     // screen:auto 且 PPT 在放映 → 跟随放映窗所在的屏（R12，旧原型 screenClass 方案）
     let pick = settings.screen.trim();
     let auto = pick.is_empty() || pick.eq_ignore_ascii_case("auto") || pick.eq_ignore_ascii_case("ppt");
@@ -270,11 +352,8 @@ fn place_overlay(app: &AppHandle, settings: &Settings) {
                 .find(|m| m.position().x == r.x && m.position().y == r.y)
                 .map(|m| m.scale_factor())
                 .unwrap_or(1.0);
-            let width = (r.w as f64 * settings.width_ratio).round() as u32;
-            let height = overlay_height(settings, scale);
-            let x = r.x + ((r.w as i64 - width as i64) / 2) as i32;
-            let y = r.y + (r.h as f64 * (1.0 - settings.bottom_ratio)).round() as i32 - height as i32;
-            let _ = win.set_size(PhysicalSize::new(width.max(200), height));
+            let (x, y, w, h) = bar_rect(settings, r.x, r.y, r.w, r.h, scale);
+            let _ = win.set_size(PhysicalSize::new(w, h));
             let _ = win.set_position(PhysicalPosition::new(x, y));
             return;
         }
@@ -285,16 +364,14 @@ fn place_overlay(app: &AppHandle, settings: &Settings) {
     let scale = mon.scale_factor();
     let size = mon.size();
     let pos = mon.position();
-    let width = (size.width as f64 * settings.width_ratio).round() as u32;
-    let height = overlay_height(settings, scale);
-    let x = pos.x + ((size.width as i64 - width as i64) / 2) as i32;
-    let y = pos.y + (size.height as f64 * (1.0 - settings.bottom_ratio)).round() as i32 - height as i32;
-    let _ = win.set_size(PhysicalSize::new(width.max(200), height));
+    let (x, y, w, h) = bar_rect(settings, pos.x, pos.y, size.width as i32, size.height as i32, scale);
+    let _ = win.set_size(PhysicalSize::new(w, h));
     let _ = win.set_position(PhysicalPosition::new(x, y));
 }
 
 fn sync_window_flags(app: &AppHandle, settings: &Settings) {
     *LAST_LAYOUT.lock().unwrap() = settings.layout.clone();
+    *LAST_SETTINGS.lock().unwrap() = Some(settings.clone());
     if let Some(win) = app.get_webview_window("overlay") {
         let _ = win.set_always_on_top(settings.always_on_top);
         let _ = win.set_ignore_cursor_events(settings.click_through);
@@ -311,6 +388,10 @@ fn sync_window_flags(app: &AppHandle, settings: &Settings) {
 
 /// 最近一次应用的布局（set_overlay_height 在贴边模式下不自行改高度）
 static LAST_LAYOUT: Mutex<String> = Mutex::new(String::new());
+/// overlay 最近自报的内容高度（R18 长高用，落位时按全高算，底部不出屏）
+static LAST_BAR_HEIGHT: Mutex<Option<u32>> = Mutex::new(None);
+/// 最近一次应用的设置快照（set_overlay_height 触发重新落位时用）
+static LAST_SETTINGS: Mutex<Option<Settings>> = Mutex::new(None);
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------- 窗口创建
@@ -347,8 +428,12 @@ fn build_main_window(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 注意：必须是 async —— 同步命令跑在主线程，里面再 build 窗口会把主线程
+/// 自己堵死（WebView2 创建回调投不回去），事件循环假死、全部 IPC 失效
+/// （2026-11-19 实测复现：点「显示字幕条」后 overlay 卡 about:blank、invoke 全挂）。
+/// Tauri v2 官方文档：在命令中创建窗口必须用 async command。
 #[tauri::command]
-fn ensure_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
+async fn ensure_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
     if app.get_webview_window("overlay").is_some() {
         sync_window_flags(&app, &settings);
         return Ok(());
@@ -362,7 +447,7 @@ fn ensure_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
         .skip_taskbar(true)
         .resizable(false)
         .focused(false)
-        .visible(false);
+        .visible(true); // 创建即显示（visible(false)+show() 在部分环境不生效）
     if let Some(dir) = dev_webview_data_dir() {
         b = b.data_directory(dir);
     }
@@ -373,8 +458,8 @@ fn ensure_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn show_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
-    ensure_overlay(app.clone(), settings.clone())?;
+async fn show_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
+    ensure_overlay(app.clone(), settings.clone()).await?;
     if let Some(win) = app.get_webview_window("overlay") {
         win.show().map_err(|e| e.to_string())?;
         sync_window_flags(&app, &settings);
@@ -431,9 +516,15 @@ fn set_overlay_height(app: AppHandle, height: u32) {
     if *LAST_LAYOUT.lock().unwrap() == "dock" {
         return;
     }
+    let h = height.clamp(60, 1200);
+    *LAST_BAR_HEIGHT.lock().unwrap() = Some(h);
     if let Some(win) = app.get_webview_window("overlay") {
         let w = win.inner_size().map(|s| s.width).unwrap_or(800);
-        let _ = win.set_size(PhysicalSize::new(w, height.clamp(60, 1200)));
+        let _ = win.set_size(PhysicalSize::new(w, h));
+    }
+    // 重新落位（底部锚定）：内容长高后不把下半截顶出屏幕
+    if let Some(s) = LAST_SETTINGS.lock().unwrap().clone() {
+        place_overlay(&app, &s);
     }
 }
 
@@ -543,13 +634,45 @@ pub fn run() {
             #[cfg(debug_assertions)]
             if std::env::args().any(|a| a == "--dev-show-overlay") {
                 let settings = Settings::default();
-                if let Err(e) = ensure_overlay(app.handle().clone(), settings.clone()) {
+                if let Err(e) = tauri::async_runtime::block_on(ensure_overlay(app.handle().clone(), settings.clone())) {
                     eprintln!("[dev-show-overlay] {e}");
                 }
                 if let Some(win) = app.get_webview_window("overlay") {
                     let _ = win.show();
                     sync_window_flags(app.handle(), &settings);
                 }
+            }
+            // 自测：--dev-selftest 显示 overlay + Rust 侧直接推测试字幕 + 打印几何
+            #[cfg(debug_assertions)]
+            if std::env::args().any(|a| a == "--dev-selftest") {
+                let handle = app.handle().clone();
+                let settings = Settings::default();
+                let _ = tauri::async_runtime::block_on(ensure_overlay(handle.clone(), settings.clone()));
+                if let Some(win) = handle.get_webview_window("overlay") {
+                    let _ = win.show();
+                }
+                sync_window_flags(&handle, &settings);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                    if let Some(w) = handle.get_webview_window("overlay") {
+                        let _ = w.emit(
+                            "page",
+                            serde_json::json!({ "page": 1, "cues": [
+                                { "zh": "自测：第一条字幕", "en": null },
+                                { "zh": "自测：第二条字幕", "en": null }
+                            ]}),
+                        );
+                        let _ = w.emit("style", Settings::default());
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        match (w.outer_position(), w.inner_size(), w.is_visible()) {
+                            (Ok(p), Ok(s), Ok(v)) => eprintln!(
+                                "[selftest] pos=({},{}) size={}x{} visible={}",
+                                p.x, p.y, s.width, s.height, v
+                            ),
+                            (e1, e2, e3) => eprintln!("[selftest] 拿不到几何: {e1:?} {e2:?} {e3:?}"),
+                        }
+                    }
+                });
             }
             // S7 自动化验证用：--dev-import <pptx> 启动即导入并打印结果
             #[cfg(debug_assertions)]
@@ -587,6 +710,7 @@ pub fn run() {
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => {
                             if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.unminimize();
                                 let _ = w.show();
                                 let _ = w.set_focus();
                             }
@@ -603,6 +727,7 @@ pub fn run() {
                         {
                             let app = tray.app_handle().clone();
                             if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.unminimize();
                                 let _ = w.show();
                                 let _ = w.set_focus();
                             }
@@ -613,16 +738,29 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 主窗口关闭 → 按 minimizeToTray 决定收托盘还是真退出（R7/R21）
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                // 关闭 × → 按 minimizeToTray 决定收托盘还是真退出（R7/R21）
+                tauri::WindowEvent::CloseRequested { api, .. } => {
                     let app = window.app_handle().clone();
-                    let minimize = load_store(app).settings.minimize_to_tray;
-                    if minimize {
+                    if load_store(app).settings.minimize_to_tray {
                         api.prevent_close();
                         let _ = window.hide();
                     }
                 }
+                // tauri v2 没有最小化事件；Windows 最小化时窗口会收到 Resized(0,0)
+                // ——拦截转成收托盘（R21 最小化到托盘，不占任务栏）
+                tauri::WindowEvent::Resized(size) => {
+                    if size.width == 0 && size.height == 0 {
+                        let app = window.app_handle().clone();
+                        if load_store(app).settings.minimize_to_tray {
+                            let _ = window.hide();
+                        }
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -635,6 +773,8 @@ pub fn run() {
             open_preview,
             close_preview,
             read_preview_image,
+            open_last_ppt,
+            detach_ppt,
             ensure_overlay,
             show_overlay,
             hide_overlay,

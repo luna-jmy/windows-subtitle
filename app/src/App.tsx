@@ -12,6 +12,7 @@ import {
   parseScript,
   toRustSettings,
 } from "./types";
+import { BarView, barContentHeight } from "./subbar";
 import "./styles.css";
 
 type MonitorInfo = {
@@ -31,7 +32,7 @@ const HOTKEYS: [string, string][] = [
   ["F9 / F8", "下一条 / 上一条（仅逐条模式）"],
   ["F7", "显示 / 隐藏字幕条"],
   ["Ctrl + Alt + P", "显示 / 隐藏这个控制台"],
-  ["Ctrl + Alt + X", "切换点击穿透（关掉后可拖动字幕条）"],
+  ["Ctrl + Alt + X", "临时切换点击穿透（默认关，字幕条可直接拖动）"],
   ["Ctrl + Alt + = / −", "放大 / 缩小字号"],
   ["Ctrl + Alt + Q", "退出程序"],
 ];
@@ -42,22 +43,27 @@ export default function App() {
   const [slide, setSlide] = useState(1);
   const [overlayShown, setOverlayShown] = useState(false);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
-  const [saved, setSaved] = useState<"idle" | "saving" | "done">("idle");
+  const [saved, setSaved] = useState<"idle" | "saving" | "done" | "error">("idle");
   const [ready, setReady] = useState(false);
   const [tab, setTab] = useState<"script" | "settings">("script");
   const [liveTick, setLiveTick] = useState(0); // overlay 加载完成后 +1，触发首次 push_page
   const [pbStatus, setPbStatus] = useState<{ index: number; total: number; paused: boolean; atEnd: boolean } | null>(null);
   const [pptLive, setPptLive] = useState(false); // PPT 放映中（COM 轮询）
   const [notice, setNotice] = useState(""); // 导入等操作的提示条
+  const [slideImg, setSlideImg] = useState<string | null>(null); // 当前页预览图
+  const [imgTick, setImgTick] = useState(0); // 导入后刷新预览图
+  const [pptImported, setPptImported] = useState(false); // 本次运行是否已导入 PPT（按钮显隐）
+  const [stageWrapW, setStageWrapW] = useState(0); // 预览包裹层实测宽（ResizeObserver，跨 tab 用 callback ref 重连）
+  const [wrapEl, setWrapEl] = useState<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const [dragging, setDragging] = useState(false);
   const settingsRef = useRef(settings);
+  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
 
   settingsRef.current = settings;
 
   const cues: Cue[] = useMemo(() => parseScript(script), [script]);
   const pageIdx = useMemo(() => cuesOfPage(cues, slide), [cues, slide]);
-  const current = pageIdx.length
-    ? cues[pageIdx[Math.min(pbStatus?.index ?? 0, pageIdx.length - 1)]]
-    : undefined;
   const pages = useMemo(() => {
     const set = new Set<number>();
     cues.forEach((c) => set.add(c.page));
@@ -82,6 +88,34 @@ export default function App() {
     })();
   }, []);
 
+  // ---------- 预览图：当前页幻灯片背景（R11，未导入则占位） ----------
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const d = await invoke<string | null>("read_preview_image", { page: slide });
+        if (alive) setSlideImg(d ?? null);
+      } catch {
+        if (alive) setSlideImg(null);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [slide, imgTick]);
+
+  // ---------- 预览包裹层宽度实测（预览=真实效果的比例换算基准） ----------
+  // callback ref：切 tab 卸载/挂载后 RO 自动重连（初始挂载在设置页时 useRef 为 null 会失联）
+  useEffect(() => {
+    if (!wrapEl) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      setStageWrapW(w);
+    });
+    ro.observe(wrapEl);
+    return () => ro.disconnect();
+  }, [wrapEl]);
+
   // ---------- 保存（防抖） ----------
   useEffect(() => {
     if (!ready) return;
@@ -94,6 +128,7 @@ export default function App() {
         setSaved("done");
       } catch (e) {
         console.error(e);
+        setSaved("error");
       }
     }, 600);
     return () => clearTimeout(t);
@@ -153,6 +188,23 @@ export default function App() {
           setPptLive(false);
           invoke("hide_overlay").catch(() => {});
           setOverlayShown(false);
+        }),
+        await listen("ppt-detached", () => {
+          setPptLive(false);
+          setPptImported(false);
+          invoke("hide_overlay").catch(() => {});
+          setOverlayShown(false);
+          setImgTick((t) => t + 1); // 预览图已删，刷新成占位
+          setNotice("已断开 PPT 挂载（deck 已关、预览图已清理），可导入其他 PPT");
+        }),
+        // 字幕条上直接拖动（overlay 窗口 OS 拖拽）→ 位置回写，预览与保存跟着同步（硬伤①）
+        await listen<any>("bar-moved", (e) => {
+          const { x, y } = e.payload;
+          setSettings((s) => ({
+            ...s,
+            posX: Math.max(0, Math.min(1, Number(x))),
+            posY: Math.max(0, Math.min(1, Number(y))),
+          }));
         })
       );
     };
@@ -162,7 +214,7 @@ export default function App() {
   }, []);
 
   function sendCtrl(kind: string, arg = 0) {
-    invoke("send_ctrl", { kind, arg }).catch(console.error);
+    invoke("send_ctrl", { kind, arg }).catch((e) => setNotice(`控制命令出错（${kind}）：${e}`));
   }
 
   function applySettings() {
@@ -180,7 +232,9 @@ export default function App() {
       setNotice("正在导入 PPT（读页数/标题 + 导出预览图）…");
       const res = await invoke<any>("import_pptx", { path });
       setScript(res.script);
-      setNotice(`已导入 ${res.pages} 页骨架，预览图在 ${res.dir}`);
+      setPptImported(true);
+      setImgTick((t) => t + 1);
+      setNotice(`已导入 ${res.pages} 页（内容取自演讲者备注），预览图在 ${res.dir}`);
     } catch (e) {
       console.error(e);
       setNotice(`导入失败：${e}`);
@@ -223,6 +277,7 @@ export default function App() {
       }
     } catch (e) {
       console.error(e);
+      setNotice(`显示/隐藏字幕条出错：${e}`);
     }
   }
 
@@ -230,7 +285,112 @@ export default function App() {
     setSlide(Math.max(1, next));
   }
 
+  // ---------- 预览几何：与 lib.rs bar_rect/target_monitor 同一选屏与公式（硬伤①②） ----------
+  // 字幕条将落在哪块屏（screen 设置同 target_monitor：auto → 主屏），比例基准就用它
+  const targetMon = useMemo(() => {
+    const pick = settings.screen.trim();
+    if (pick && !/^(auto|ppt)$/i.test(pick)) {
+      const idx = Number(pick);
+      if (Number.isFinite(idx)) {
+        const m = monitors.find((mm) => mm.index === idx);
+        if (m) return m;
+      }
+    }
+    return monitors.find((m) => m.primary) ?? monitors[0];
+  }, [monitors, settings.screen]);
+  const monW = targetMon?.width ?? 1920;
+  const monH = targetMon?.height ?? 1080;
+  const monScale = targetMon?.scale ?? 1;
+  const aspect = monW / monH;
+  // 舞台尺寸：宽度 ≤ 容器宽，高度 ≤ 上限（全宽预览太占竖向空间）；按屏幕比例锁定
+  const stageMaxH = Math.min(300, Math.max(180, Math.round(window.innerHeight * 0.32)));
+  const stageW = stageWrapW > 0 ? Math.min(stageWrapW, Math.round(stageMaxH * aspect)) : 0;
+  const stageH = stageW > 0 ? Math.round(stageW / aspect) : Math.round((stageMaxH * 16) / 9);
+  // 字号等是逻辑像素：真实占屏比例 = 逻辑值×屏scale / 屏物理宽；预览同比例缩放
+  const k = stageW > 0 ? (stageW * monScale) / monW : 0.3;
+  const barW = settings.widthRatio * stageW;
+  const barH = barContentHeight(settings) * k;
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+  // 浮层模式的字幕条窗口矩形（= 真实 overlay 窗口在屏上的落位比例）
+  const floatRect = (() => {
+    const left =
+      settings.posX != null
+        ? clamp(settings.posX * stageW, 0, stageW - barW)
+        : (stageW - barW) / 2;
+    const top =
+      settings.posY != null
+        ? clamp(settings.posY * stageH, 0, stageH - barH)
+        : stageH * (1 - settings.bottomRatio) - barH;
+    return { left, top, width: barW, height: barH };
+  })();
+  // 贴边模式的字幕条矩形 = 整条贴边（与 ppt.rs apply_dock/dock_geometry 对应）
+  const dockRect = (() => {
+    const r = clamp(settings.dockRatio, 0.08, 0.5);
+    switch (settings.dockSide) {
+      case "bottom":
+        return { left: 0, top: stageH * (1 - r), width: stageW, height: stageH * r };
+      case "left":
+        return { left: 0, top: 0, width: stageW * r, height: stageH };
+      case "right":
+        return { left: stageW * (1 - r), top: 0, width: stageW * r, height: stageH };
+      default: // top
+        return { left: 0, top: 0, width: stageW, height: stageH * r };
+    }
+  })();
+  const winRect = settings.layout === "dock" ? dockRect : floatRect;
+  // 放映区矩形（dock 时被缩让位的那块；overlay 时=整个舞台）
+  const slideRect = (() => {
+    if (settings.layout !== "dock") return { left: 0, top: 0, width: stageW, height: stageH };
+    const r = clamp(settings.dockRatio, 0.08, 0.5);
+    switch (settings.dockSide) {
+      case "bottom":
+        return { left: 0, top: 0, width: stageW, height: stageH * (1 - r) };
+      case "left":
+        return { left: stageW * r, top: 0, width: stageW * (1 - r), height: stageH };
+      case "right":
+        return { left: 0, top: 0, width: stageW * (1 - r), height: stageH };
+      default:
+        return { left: 0, top: stageH * r, width: stageW, height: stageH * (1 - r) };
+    }
+  })();
+
+  // ---------- 预览里拖动字幕条（硬伤①：拖完的位置即真实播放位置） ----------
+  function onBarPointerDown(e: React.PointerEvent) {
+    if (settings.layout !== "overlay" || !stageRef.current) return;
+    const st = stageRef.current.getBoundingClientRect();
+    dragRef.current = {
+      dx: e.clientX - st.left - winRect.left,
+      dy: e.clientY - st.top - winRect.top,
+    };
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    setDragging(true);
+  }
+  function onBarPointerMove(e: React.PointerEvent) {
+    if (!dragRef.current || !stageRef.current || stageW === 0) return;
+    const st = stageRef.current.getBoundingClientRect();
+    const nx = e.clientX - st.left - dragRef.current.dx;
+    const ny = e.clientY - st.top - dragRef.current.dy;
+    // 钳制在屏内（与 lib.rs bar_rect 一致：顶左不越过 屏宽-条宽 / 屏高-条高）
+    setSettings((s) => ({
+      ...s,
+      posX: clamp(nx / stageW, 0, Math.max(0, 1 - barW / stageW)),
+      posY: clamp(ny / stageH, 0, Math.max(0, 1 - barH / stageH)),
+    }));
+  }
+  function onBarPointerUp() {
+    dragRef.current = null;
+    setDragging(false);
+    // 拖完立即落位真实字幕条（push_style effect 也会触发，这里兜底一次）
+    applySettings();
+  }
+
+  function resetBarPos() {
+    setSettings((s) => ({ ...s, posX: null, posY: null }));
+  }
+
   const totalPages = cues.length ? Math.max(...cues.map((c) => c.pageEnd)) : 1;
+  const pageCueList = pageIdx.map((i) => ({ zh: cues[i].zh, en: cues[i].en || null }));
+  const posCustom = settings.posX != null || settings.posY != null;
 
   return (
     <div className="app">
@@ -251,19 +411,43 @@ export default function App() {
           <span className="sep">·</span>
           {cues.length} 条 / {totalPages} 页
           <span className="sep">·</span>
-          {saved === "saving" ? "保存中…" : "已保存"}
+          {saved === "saving" ? "保存中…" : saved === "error" ? "保存失败" : "已保存"}
         </div>
         <div className="top-actions">
-          <button className="btn ghost" onClick={importPpt}>
-            导入 PPT
-          </button>
+          {/* 按钮显隐：未导入只给「导入 PPT」；导入后换成「打开/断开」；断开后回到「导入」 */}
+          {!pptImported ? (
+            <button className="btn ghost" onClick={importPpt}>
+              导入 PPT
+            </button>
+          ) : (
+            <>
+              <button
+                className="btn ghost"
+                onClick={() => invoke("open_last_ppt").catch((e) => setNotice(`打开 PPT 出错：${e}`))}
+              >
+                打开 PPT
+              </button>
+              <button
+                className="btn ghost"
+                onClick={() => invoke("detach_ppt").catch(() => {})}
+                title="关掉软件挂载的 PPT、清理预览图并停止跟随，方便换下一个"
+              >
+                断开 PPT
+              </button>
+            </>
+          )}
           <button className="btn ghost" onClick={importDraft}>
             导入译稿
           </button>
           <button
             className="btn"
             onClick={async () => {
-              await invoke("open_preview").catch(console.error);
+              try {
+                await invoke("open_preview");
+              } catch (e) {
+                setNotice(`打开预览窗出错：${e}`);
+                return;
+              }
               if (!overlayShown) await toggleOverlay();
             }}
           >
@@ -289,9 +473,83 @@ export default function App() {
         </button>
       </div>
 
-      <main className="content">
+      <main className={tab === "script" ? "content two-row" : "content"}>
         {tab === "script" ? (
           <>
+                        <div className="preview-card">
+              <div className="preview-label">
+                当前字幕预览 · {settings.layout === "dock" ? "贴边布局" : "覆盖布局"}
+                （与实际播放一致{settings.layout === "overlay" ? "，拖动字幕条可调位置" : ""}）
+                {slideImg ? " · 幻灯片背景" : ""}
+              </div>
+              <div className="stage-wrap" ref={setWrapEl}>
+              <div
+                className="preview-stage"
+                ref={stageRef}
+                style={stageW > 0 ? { width: stageW, height: stageH } : undefined}
+              >
+                {/* 放映区：overlay=整块舞台；dock=让位后的剩余区（幻灯片贴在其中） */}
+                <div
+                  className="slide-area"
+                  style={{
+                    left: slideRect.left,
+                    top: slideRect.top,
+                    width: slideRect.width,
+                    height: slideRect.height,
+                  }}
+                >
+                  {slideImg ? (
+                    <img className="slide-img" src={slideImg} alt={`第 ${slide} 页`} draggable={false} />
+                  ) : (
+                    <div className="slide-none">未导入预览图（导入 PPT 后显示）</div>
+                  )}
+                </div>
+                {/* 字幕条窗口矩形：位置/尺寸 = 真实 overlay 窗口落位（bar_rect 同公式） */}
+                <div
+                  className={`bar-win ${settings.layout === "overlay" ? "draggable" : ""} ${dragging ? "dragging" : ""}`}
+                  style={{
+                    left: winRect.left,
+                    top: winRect.top,
+                    width: winRect.width,
+                    height: winRect.height,
+                  }}
+                  onPointerDown={onBarPointerDown}
+                  onPointerMove={onBarPointerMove}
+                  onPointerUp={onBarPointerUp}
+                >
+                  <BarView
+                    settings={settings}
+                    cues={pageCueList}
+                    mode={settings.advance}
+                    stepIndex={Math.min(pbStatus?.index ?? 0, Math.max(0, pageCueList.length - 1))}
+                    offset={0}
+                    paused={pbStatus?.paused}
+                    empty={pageCueList.length === 0}
+                    scale={k}
+                  />
+                </div>
+              </div>
+              </div>
+              <div className="preview-meta">
+                <input
+                  className="page-input"
+                  type="number"
+                  min={1}
+                  value={slide}
+                  onChange={(e) => goSlide(Number(e.target.value))}
+                />
+                页 · {settings.advance === "scroll" ? "滚动" : "逐条"} · 本页 {pageIdx.length} 条
+                {settings.advance === "step" && pbStatus ? ` · 第 ${Math.min(pbStatus.index + 1, pbStatus.total)}/${pbStatus.total} 条` : ""}
+                {pbStatus?.paused ? " · 已暂停" : ""}
+                {pbStatus?.atEnd ? " · 已到页尾" : ""}
+                {posCustom ? (
+                  <button className="btn ghost mini" onClick={resetBarPos} title="回到底部居中默认位置">
+                    恢复默认位置
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
             <section className="editor">
               <textarea
                 className="script-input"
@@ -307,33 +565,6 @@ export default function App() {
             </section>
 
             <section className="side">
-              <div className="preview-card">
-                <div className="preview-label">当前字幕预览</div>
-                <div className="preview-bar" data-align={settings.align}>
-                  <div className="preview-zh" style={{ fontSize: Math.min(34, settings.fontSize * 0.62) }}>
-                    {current?.zh || "（这一条是空的）"}
-                  </div>
-                  {settings.showEn && current?.en ? (
-                    <div className="preview-en" style={{ fontSize: Math.min(20, settings.enSize * 0.7) }}>
-                      {current.en}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="preview-meta">
-                  <input
-                    className="page-input"
-                    type="number"
-                    min={1}
-                    value={slide}
-                    onChange={(e) => goSlide(Number(e.target.value))}
-                  />
-                  页 · {settings.advance === "scroll" ? "滚动" : "逐条"} · 本页 {pageIdx.length} 条
-                  {settings.advance === "step" && pbStatus ? ` · 第 ${Math.min(pbStatus.index + 1, pbStatus.total)}/${pbStatus.total} 条` : ""}
-                  {pbStatus?.paused ? " · 已暂停" : ""}
-                  {pbStatus?.atEnd ? " · 已到页尾" : ""}
-                </div>
-              </div>
-
               <div className="controls">
                 <button className="btn" onClick={() => pageStep(-1)}>
                   ← 上一页
@@ -342,7 +573,7 @@ export default function App() {
                   下一页 →
                 </button>
                 <button className="btn ghost" onClick={() => sendCtrl("pause")}>
-                  ⏸ 暂停/继续
+                  {pbStatus?.paused ? "▶ 继续" : "⏸ 暂停"}
                 </button>
                 <button className="btn ghost" onClick={() => sendCtrl("restart")}>
                   ↺ 回本页开头
@@ -523,12 +754,13 @@ export default function App() {
             </div>
 
             <div className="field">
-              <label>距屏幕底部 <b>{Math.round(settings.bottomRatio * 100)}%</b></label>
+              <label>距屏幕底部 <b>{Math.round(settings.bottomRatio * 100)}%</b>{posCustom ? "（已自定义位置，以拖动位置为准）" : ""}</label>
               <input
                 type="range"
                 min={1}
                 max={40}
                 value={Math.round(settings.bottomRatio * 100)}
+                disabled={posCustom}
                 onChange={(e) => setSettings({ ...settings, bottomRatio: Number(e.target.value) / 100 })}
               />
             </div>
@@ -575,11 +807,15 @@ export default function App() {
               <label>
                 <input
                   type="checkbox"
-                  checked={settings.clickThrough}
-                  onChange={(e) => setSettings({ ...settings, clickThrough: e.target.checked })}
+                  checked={settings.textOnly}
+                  onChange={(e) => setSettings({ ...settings, textOnly: e.target.checked })}
                 />
-                鼠标点击穿透（推荐开着，避免挡住 PPT 操作）
+                仅文字字幕（无背景板，更不遮挡画面）
               </label>
+              <p className="field-hint">
+                字幕条默认可直接拖动调位置；Ctrl+Alt+X 可临时切换点击穿透（放 transcript
+                里一般不用开——穿透会把点击传给下层的放映画面）。
+              </p>
             </div>
 
             <div className="field">
