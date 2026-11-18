@@ -1,0 +1,15 @@
+# 依赖与构建产物（app 内部还有自己的 .gitignore）
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+# 敏感会议材料与旧版代码，不进 git
+Ref&Test/
+_待删除_旧Python版/
+
+# 本机 npm 缓存（若指到仓库内）
+_npmcache/
+
+# 日志与临时文件
+*.log

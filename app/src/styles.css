@@ -1,0 +1,222 @@
+:root {
+  --bg: #0f1216;
+  --panel: #161b22;
+  --panel-2: #1c232c;
+  --line: #2a323d;
+  --text: #e6edf3;
+  --muted: #8b98a5;
+  --accent: #3b82f6;
+  --accent-2: #2563eb;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.brand { font-size: 16px; font-weight: 700; }
+.brand-sub { margin-left: 10px; font-size: 12px; font-weight: 400; color: var(--muted); }
+
+.top-status {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.sep { opacity: 0.4; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.on { background: #22c55e; box-shadow: 0 0 8px #22c55e88; }
+.dot.off { background: #4b5563; }
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 20px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 8px 14px;
+  font-size: 13.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.content {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 16px;
+  padding: 16px 20px 20px;
+  min-height: 0;
+}
+
+.editor { display: flex; flex-direction: column; min-height: 0; }
+
+.script-input {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 14px 16px;
+  font-family: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+  font-size: 14px;
+  line-height: 1.75;
+  outline: none;
+}
+
+.script-input:focus { border-color: var(--accent); }
+
+.hint { color: var(--muted); font-size: 12px; margin: 10px 2px 0; line-height: 1.6; }
+.hint code {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11.5px;
+}
+
+.side { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+
+.preview-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.preview-label { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+
+.preview-bar {
+  background: #0a0e14;
+  border-radius: 10px;
+  padding: 16px 18px;
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.preview-bar[data-align="left"] { text-align: left; }
+.preview-zh { font-weight: 700; color: #fff; line-height: 1.3; }
+.preview-en { color: #c9d4e0; }
+
+.preview-meta { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-top: 10px; }
+
+.page-input {
+  width: 64px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 8px;
+  font-family: inherit;
+}
+
+.controls { display: flex; gap: 10px; }
+
+.btn {
+  flex: 1;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 14px;
+  font-size: 13.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.btn:hover { border-color: #3d4855; background: #222b36; }
+.btn.primary { background: var(--accent-2); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent); }
+.btn.ghost { background: transparent; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+
+.page-list { display: flex; flex-wrap: wrap; gap: 6px; overflow-y: auto; }
+
+.page-chip {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.page-chip.active { color: #fff; border-color: var(--accent); background: #1d2a44; }
+
+.settings { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; max-width: 720px; }
+
+.field { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-bottom: 1px solid #1e242c; }
+.field label { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.field b { color: #7fb0ff; font-weight: 600; }
+
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+select, input[type="checkbox"] { font-family: inherit; }
+select {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  width: 100%;
+}
+
+input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); }
+
+.hotkeys { margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.hotkeys-title { font-size: 12.5px; color: var(--muted); margin-bottom: 10px; }
+.hotkey-row { display: flex; align-items: center; gap: 12px; padding: 4px 0; font-size: 13px; }
+kbd {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  min-width: 96px;
+  text-align: center;
+}
