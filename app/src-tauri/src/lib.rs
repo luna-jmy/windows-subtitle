@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod script;
+
 // ---------------------------------------------------------------- 数据模型
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -118,6 +120,13 @@ fn save_store(app: AppHandle, store: Store) -> Result<(), String> {
 #[tauri::command]
 fn store_location(app: AppHandle) -> String {
     store_path(&app).to_string_lossy().to_string()
+}
+
+/// 校验字幕稿（PRD 5.1 格式），返回条数/页数摘要；格式错误时报"第 N 行：原因"
+#[tauri::command]
+fn validate_script(text: String) -> Result<script::ScriptSummary, String> {
+    let cues = script::parse_script(&text).map_err(|e| format!("第 {} 行：{}", e.line_no, e.message))?;
+    Ok(script::summarize(&cues))
 }
 
 // ---------------------------------------------------------------- 浮层窗口
@@ -384,6 +393,7 @@ pub fn run() {
             load_store,
             save_store,
             store_location,
+            validate_script,
             ensure_overlay,
             show_overlay,
             hide_overlay,
