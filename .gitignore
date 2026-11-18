@@ -3,6 +3,7 @@ app/node_modules/
 app/dist/
 app/src-tauri/target/
 app/src-tauri/gen/schemas/
+app/.webview2-data/
 
 # 敏感会议材料与旧版代码，不进 git
 Ref&Test/

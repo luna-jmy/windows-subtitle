@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -47,7 +47,7 @@ pub struct Store {
     pub script: String,
 }
 
-#[derive(Serialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct CuePayload {
     pub zh: String,
     pub en: String,
@@ -182,13 +182,43 @@ fn sync_window_flags(app: &AppHandle, settings: &Settings) {
     place_overlay(app, settings);
 }
 
+// ---------------------------------------------------------------- 窗口创建
+
+/// dev 构建把 WebView2 数据目录指到仓库内（DSH 沙箱拒写 AppData\Local，
+/// 否则 create_dir_all(AppData\...) 直接 os error 5 崩在启动）。
+/// release 在正常机器上跑，保持默认（AppData）。
+fn dev_webview_data_dir() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.webview2-data"))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
+fn build_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let mut b = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("字幕控制台 · Windows Subtitle")
+        .inner_size(1040.0, 760.0)
+        .min_inner_size(880.0, 600.0)
+        .resizable(true)
+        .center();
+    if let Some(dir) = dev_webview_data_dir() {
+        b = b.data_directory(dir);
+    }
+    b.build()?;
+    Ok(())
+}
+
 #[tauri::command]
 fn ensure_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
     if app.get_webview_window("overlay").is_some() {
         sync_window_flags(&app, &settings);
         return Ok(());
     }
-    let win = WebviewWindowBuilder::new(&app, "overlay", WebviewUrl::App("overlay.html".into()))
+    let mut b = WebviewWindowBuilder::new(&app, "overlay", WebviewUrl::App("overlay.html".into()))
         .title("subtitle-overlay")
         .transparent(true)
         .decorations(false)
@@ -197,9 +227,11 @@ fn ensure_overlay(app: AppHandle, settings: Settings) -> Result<(), String> {
         .skip_taskbar(true)
         .resizable(false)
         .focused(false)
-        .visible(false)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .visible(false);
+    if let Some(dir) = dev_webview_data_dir() {
+        b = b.data_directory(dir);
+    }
+    let win = b.build().map_err(|e| e.to_string())?;
     let _ = win.set_ignore_cursor_events(settings.click_through);
     sync_window_flags(&app, &settings);
     Ok(())
@@ -326,6 +358,8 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // 窗口在代码里创建（dev 时 WebView2 数据目录指到仓库内，绕开沙箱 AppData 限制）
+            build_main_window(app.handle())?;
             let handle = app.handle().clone();
             for (sc, _) in hotkey_specs() {
                 if let Err(e) = handle.global_shortcut().register(sc) {
