@@ -195,7 +195,10 @@ export default function App() {
           invoke("hide_overlay").catch(() => {});
           setOverlayShown(false);
           setImgTick((t) => t + 1); // 预览图已删，刷新成占位
-          setNotice("已断开 PPT 挂载（deck 已关、预览图已清理），可导入其他 PPT");
+          setScript(""); // 字幕稿一并清空：断开=结束这一场，旧稿与新 deck 对不上（防抖保存自动落盘）
+          setSlide(1);
+          setPbStatus(null);
+          setNotice("已断开 PPT 挂载（deck 已关、预览图与字幕稿已清理），可导入下一个 PPT");
         }),
         // 字幕条上直接拖动（overlay 窗口 OS 拖拽）→ 位置回写，预览与保存跟着同步（硬伤①）
         await listen<any>("bar-moved", (e) => {
@@ -259,6 +262,46 @@ export default function App() {
 
   function pageStep(dir: number) {
     setSlide((v) => Math.max(1, v + dir));
+  }
+
+  // ---------- 无 PPT 稿件：模板插入 + 格式校验 ----------
+  const SCRIPT_TEMPLATE = `=== 1 ===
+# 第一页的标题（# 开头是注释，不会显示）
+这是第一页的第一句字幕（一行就是一条字幕，太长会自动折行）
+这是第一页的第二句字幕
+EN: Optional English line, attached to the Chinese line above
+
+=== 2 ===
+第二页从这里继续，页号对应 PPT 页码（没有 PPT 就按顺序编页）
+
+=== 3-5 ===
+=== 3-5 === 表示第 3 到 5 页共用这些字幕
+`;
+
+  function insertTemplate() {
+    if (script.trim()) {
+      // 编辑器已有内容：追加到末尾（不覆盖，用户自己删不要的部分）
+      setScript(script.replace(/\s*$/, "") + "\n\n" + SCRIPT_TEMPLATE);
+      setNotice("模板已追加到编辑器末尾（不需要的部分直接删掉）");
+    } else {
+      setScript(SCRIPT_TEMPLATE);
+      setNotice("已插入模板：改内容即可，格式有疑问点「格式说明」或「校验格式」");
+    }
+  }
+
+  async function validateDraft() {
+    if (!script.trim()) {
+      setNotice("编辑器是空的：先写稿或点「插入模板」");
+      return;
+    }
+    try {
+      const sum = await invoke<any>("validate_script", { text: script });
+      setNotice(
+        `格式正确：共 ${sum.cues} 条字幕 / ${sum.pages} 页（P${sum.first_page}–P${sum.last_page}）`
+      );
+    } catch (e) {
+      setNotice(`格式有问题：${e}（对照「格式说明」修改即可）`);
+    }
   }
 
   function bumpFont(delta: number) {
@@ -476,11 +519,11 @@ export default function App() {
       <main className={tab === "script" ? "content two-row" : "content"}>
         {tab === "script" ? (
           <>
-                        <div className="preview-card">
+            <div className="preview-card">
               <div className="preview-label">
                 当前字幕预览 · {settings.layout === "dock" ? "贴边布局" : "覆盖布局"}
                 （与实际播放一致{settings.layout === "overlay" ? "，拖动字幕条可调位置" : ""}）
-                {slideImg ? " · 幻灯片背景" : ""}
+                {slideImg ? " · 幻灯片背景" : " · 无 PPT 模式（舞台=真实屏幕比例）"}
               </div>
               <div className="stage-wrap" ref={setWrapEl}>
               <div
@@ -501,7 +544,11 @@ export default function App() {
                   {slideImg ? (
                     <img className="slide-img" src={slideImg} alt={`第 ${slide} 页`} draggable={false} />
                   ) : (
-                    <div className="slide-none">未导入预览图（导入 PPT 后显示）</div>
+                    <div className="slide-none">
+                      <div className="slide-none-title">无 PPT 模式</div>
+                      <div>舞台按真实屏幕比例显示，字幕条位置 = 实际播放位置</div>
+                      <div>导入 PPT 后这里显示幻灯片；没有 PPT 也能直接放映字幕</div>
+                    </div>
                   )}
                 </div>
                 {/* 字幕条窗口矩形：位置/尺寸 = 真实 overlay 窗口落位（bar_rect 同公式） */}
@@ -551,6 +598,41 @@ export default function App() {
             </div>
 
             <section className="editor">
+              <div className="editor-toolbar">
+                <button
+                  className="btn ghost mini"
+                  onClick={insertTemplate}
+                  title={script.trim() ? "追加到编辑器末尾" : "插入起步模板"}
+                >
+                  插入模板
+                </button>
+                <button className="btn ghost mini" onClick={validateDraft}>
+                  校验格式
+                </button>
+                <details className="fmt-help">
+                  <summary>格式说明（无 PPT 也能用）</summary>
+                  <div>
+                    <p>
+                      <code>=== 2 ===</code> 表示 PPT 第 2 页；
+                      <code>=== 3-5 ===</code> 表示第 3 到 5 页共用同一段字幕。页号从 1 开始。
+                    </p>
+                    <p>
+                      一行就是一条字幕，太长会自动折行（最多 5 行）。空行随意，不影响解析。
+                    </p>
+                    <p>
+                      <code>EN: 英文</code> 跟在中文句后面，表示这一条的英文（可选）。
+                    </p>
+                    <p>
+                      <code># 注释</code> 开头的行不会显示，可用来写页标题、提词备注。
+                    </p>
+                    <p>
+                      <b>没有 PPT 也能用</b>：不导入 PPT，直接在这里写稿、点「显示字幕条」即可放映；
+                      预览框会按真实屏幕比例显示字幕位置与效果。
+                    </p>
+                    <p>写完点「校验格式」，有错会精确到行号；对了会报条数和页数。</p>
+                  </div>
+                </details>
+              </div>
               <textarea
                 className="script-input"
                 spellCheck={false}

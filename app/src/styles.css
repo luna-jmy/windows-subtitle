@@ -257,9 +257,63 @@ kbd {
   user-select: none;
 }
 .slide-none {
-  color: #4a5262;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #566078;
   font-size: 12px;
+  text-align: center;
+  background: linear-gradient(135deg, #0d1118 0%, #131a28 55%, #0d1118 100%);
 }
+.slide-none-title {
+  color: #7fb0ff;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 1px;
+}
+
+/* 编辑器工具行：插入模板 / 校验格式 / 格式说明 */
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.editor-toolbar .btn { flex: 0 0 auto; }
+.fmt-help { position: relative; }
+.fmt-help summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+  list-style: none;
+}
+.fmt-help summary::before { content: "▸ "; }
+.fmt-help[open] summary::before { content: "▾ "; }
+.fmt-help > div {
+  position: absolute;
+  z-index: 40;
+  top: 24px;
+  left: 0;
+  width: 430px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: #12161d;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--text);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+}
+.fmt-help p { margin: 4px 0; }
+.fmt-help b { color: #7fb0ff; }
 
 /* 字幕条窗口矩形：真实 overlay 窗口的等比映射，内容用共享 BarView 居中（同 overlay-root） */
 .bar-win {

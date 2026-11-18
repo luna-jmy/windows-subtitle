@@ -1,7 +1,15 @@
-# Tauri + React + Typescript
+# Windows Subtitle · app
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Tauri 2 + React 19 + TypeScript 前端与 Rust 后端。
 
-## Recommended IDE Setup
+- 项目说明：[根 README](../README.md)
+- 使用手册：[docs/USAGE.md](../docs/USAGE.md)
+- 架构与代码导读：[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md)
+- AI 代理守则：[AGENTS.md](../AGENTS.md)
+- 产品需求：[PRD.md](../PRD.md)
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+```bash
+npm install
+npm run tauri dev     # 开发
+npm run tauri build   # NSIS 安装包
+```
