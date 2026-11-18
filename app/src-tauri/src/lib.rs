@@ -360,6 +360,18 @@ pub fn run() {
         .setup(|app| {
             // 窗口在代码里创建（dev 时 WebView2 数据目录指到仓库内，绕开沙箱 AppData 限制）
             build_main_window(app.handle())?;
+            // S1 自动化实测用：--dev-show-overlay 启动即创建并显示字幕条
+            #[cfg(debug_assertions)]
+            if std::env::args().any(|a| a == "--dev-show-overlay") {
+                let settings = Settings::default();
+                if let Err(e) = ensure_overlay(app.handle().clone(), settings.clone()) {
+                    eprintln!("[dev-show-overlay] {e}");
+                }
+                if let Some(win) = app.get_webview_window("overlay") {
+                    let _ = win.show();
+                    sync_window_flags(app.handle(), &settings);
+                }
+            }
             let handle = app.handle().clone();
             for (sc, _) in hotkey_specs() {
                 if let Err(e) = handle.global_shortcut().register(sc) {
