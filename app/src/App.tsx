@@ -22,10 +22,14 @@ type MonitorInfo = {
 };
 
 const HOTKEYS: [string, string][] = [
-  ["F9", "下一条字幕"],
-  ["F8", "上一条字幕"],
+  ["Ctrl + Alt + 空格", "暂停 / 继续滚动（仅滚动模式）"],
+  ["Ctrl + Alt + ↑ / ↓", "滚动模式：手动推 / 退一段"],
+  ["Ctrl + Alt + → / ←", "下一页 / 上一页（手动翻页兜底）"],
+  ["Ctrl + Alt + R", "回到本页开头重滚"],
+  ["F9 / F8", "下一条 / 上一条（仅逐条模式）"],
   ["F7", "显示 / 隐藏字幕条"],
   ["Ctrl + Alt + P", "显示 / 隐藏这个控制台"],
+  ["Ctrl + Alt + X", "切换点击穿透（关掉后可拖动字幕条）"],
   ["Ctrl + Alt + = / −", "放大 / 缩小字号"],
   ["Ctrl + Alt + Q", "退出程序"],
 ];
@@ -33,20 +37,23 @@ const HOTKEYS: [string, string][] = [
 export default function App() {
   const [script, setScript] = useState("");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [index, setIndex] = useState(0);
   const [slide, setSlide] = useState(1);
   const [overlayShown, setOverlayShown] = useState(false);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [saved, setSaved] = useState<"idle" | "saving" | "done">("idle");
   const [ready, setReady] = useState(false);
   const [tab, setTab] = useState<"script" | "settings">("script");
+  const [liveTick, setLiveTick] = useState(0); // overlay 加载完成后 +1，触发首次 push_page
+  const [pbStatus, setPbStatus] = useState<{ index: number; total: number; paused: boolean; atEnd: boolean } | null>(null);
   const settingsRef = useRef(settings);
-  const indexRef = useRef(0);
 
   settingsRef.current = settings;
 
   const cues: Cue[] = useMemo(() => parseScript(script), [script]);
-  const current = cues[Math.min(index, Math.max(0, cues.length - 1))];
+  const pageIdx = useMemo(() => cuesOfPage(cues, slide), [cues, slide]);
+  const current = pageIdx.length
+    ? cues[pageIdx[Math.min(pbStatus?.index ?? 0, pageIdx.length - 1)]]
+    : undefined;
   const pages = useMemo(() => {
     const set = new Set<number>();
     cues.forEach((c) => set.add(c.page));
@@ -88,54 +95,55 @@ export default function App() {
     return () => clearTimeout(t);
   }, [script, settings, ready]);
 
-  // ---------- 推送字幕 / 样式 ----------
+  // ---------- 推送当前页字幕段 / 样式（播放状态机在 overlay，PRD 6.2） ----------
   useEffect(() => {
-    if (!ready) return;
-    indexRef.current = index;
-    const cue = cues[Math.min(index, Math.max(0, cues.length - 1))];
-    invoke("push_cue", {
-      payload: {
-        zh: cue?.zh ?? "",
-        en: cue?.en ?? "",
-        index,
-        total: cues.length,
-        page: cue?.page ?? 0,
-        visible: cues.length > 0,
-      },
+    if (!ready || !overlayShown) return;
+    const list = cuesOfPage(cues, slide).map((i) => ({
+      zh: cues[i].zh,
+      en: cues[i].en ? cues[i].en : null,
+    }));
+    invoke("push_page", {
+      page: slide,
+      cues: list,
+      settings: toRustSettings(settingsRef.current),
     }).catch(console.error);
-  }, [index, cues, ready]);
+  }, [slide, cues, ready, overlayShown, liveTick]);
 
   useEffect(() => {
     if (!ready) return;
     invoke("push_style", { settings: toRustSettings(settings) }).catch(console.error);
   }, [settings, ready]);
 
-  // ---------- 全局热键 ----------
+  // ---------- 全局热键（播放类热键由 overlay 自己处理，这里只管应用级） ----------
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
     const reg = async () => {
       unlisteners.push(
-        await listen("hk:next", () => step(1)),
-        await listen("hk:prev", () => step(-1)),
         await listen("hk:toggle", () => toggleOverlay()),
         await listen("hk:panel", () => invoke("toggle_console").catch(() => {})),
         await listen("hk:font-up", () => bumpFont(2)),
         await listen("hk:font-down", () => bumpFont(-2)),
-        await listen("hk:quit", () => invoke("quit_app").catch(() => {}))
+        await listen("hk:quit", () => invoke("quit_app").catch(() => {})),
+        await listen("hk:page-next", () => setSlide((v) => Math.max(1, v + 1))),
+        await listen("hk:page-prev", () => setSlide((v) => Math.max(1, v - 1))),
+        await listen("hk:passthrough", () =>
+          setSettings((s) => ({ ...s, clickThrough: !s.clickThrough }))
+        ),
+        await listen("overlay-ready", () => setLiveTick((t) => t + 1)),
+        await listen<any>("playback-status", (e) => setPbStatus(e.payload))
       );
     };
     reg();
     return () => unlisteners.forEach((u) => u());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cues]);
+  }, []);
 
-  function step(delta: number) {
-    setIndex((i) => {
-      const next = Math.max(0, Math.min(cues.length - 1, i + delta));
-      const cue = cues[next];
-      if (cue) setSlide(cue.page);
-      return next;
-    });
+  function sendCtrl(kind: string, arg = 0) {
+    invoke("send_ctrl", { kind, arg }).catch(console.error);
+  }
+
+  function pageStep(dir: number) {
+    setSlide((v) => Math.max(1, v + dir));
   }
 
   function bumpFont(delta: number) {
@@ -157,11 +165,8 @@ export default function App() {
     }
   }
 
-  async function goSlide(next: number) {
-    const target = Math.max(1, next);
-    setSlide(target);
-    const list = cuesOfPage(cues, target);
-    if (list.length) setIndex(list[0]);
+  function goSlide(next: number) {
+    setSlide(Math.max(1, next));
   }
 
   const totalPages = cues.length ? Math.max(...cues.map((c) => c.pageEnd)) : 1;
@@ -235,23 +240,32 @@ export default function App() {
                     value={slide}
                     onChange={(e) => goSlide(Number(e.target.value))}
                   />
-                  页 · 第 {cues.length ? index + 1 : 0} / {cues.length} 条
+                  页 · {settings.advance === "scroll" ? "滚动" : "逐条"} · 本页 {pageIdx.length} 条
+                  {settings.advance === "step" && pbStatus ? ` · 第 ${Math.min(pbStatus.index + 1, pbStatus.total)}/${pbStatus.total} 条` : ""}
+                  {pbStatus?.paused ? " · 已暂停" : ""}
+                  {pbStatus?.atEnd ? " · 已到页尾" : ""}
                 </div>
               </div>
 
               <div className="controls">
-                <button className="btn" onClick={() => goSlide(slide - 1)}>
+                <button className="btn" onClick={() => pageStep(-1)}>
                   ← 上一页
                 </button>
-                <button className="btn" onClick={() => goSlide(slide + 1)}>
+                <button className="btn" onClick={() => pageStep(1)}>
                   下一页 →
+                </button>
+                <button className="btn ghost" onClick={() => sendCtrl("pause")}>
+                  ⏸ 暂停/继续
+                </button>
+                <button className="btn ghost" onClick={() => sendCtrl("restart")}>
+                  ↺ 回本页开头
                 </button>
               </div>
               <div className="controls">
-                <button className="btn primary" onClick={() => step(-1)}>
+                <button className="btn primary" onClick={() => sendCtrl("step", -1)} disabled={settings.advance === "scroll"}>
                   F8 上一条
                 </button>
-                <button className="btn primary" onClick={() => step(1)}>
+                <button className="btn primary" onClick={() => sendCtrl("step", 1)} disabled={settings.advance === "scroll"}>
                   F9 下一条
                 </button>
               </div>
@@ -271,6 +285,71 @@ export default function App() {
           </>
         ) : (
           <section className="settings">
+            <div className="field">
+              <label>推进模式（运行中可切）</label>
+              <select
+                value={settings.advance}
+                onChange={(e) => setSettings({ ...settings, advance: e.target.value as Settings["advance"] })}
+              >
+                <option value="scroll">整段滚动 · 进页自动上滚</option>
+                <option value="step">逐条推进 · F9 下一条</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label>
+                基础显示行数 <b>{settings.lines}</b>（折行超出自动增高，封顶 5）
+              </label>
+              <input
+                type="range"
+                min={1}
+                max={5}
+                value={settings.lines}
+                onChange={(e) => setSettings({ ...settings, lines: Number(e.target.value) })}
+              />
+            </div>
+
+            {settings.advance === "scroll" ? (
+              <>
+                <div className="field">
+                  <label>
+                    滚动速度 <b>{settings.scrollSpeed.toFixed(1)} 行/秒</b>
+                  </label>
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={2}
+                    step={0.1}
+                    value={settings.scrollSpeed}
+                    onChange={(e) => setSettings({ ...settings, scrollSpeed: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="field">
+                  <label>
+                    进页停留 <b>{settings.scrollDelay} ms</b>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={3000}
+                    step={100}
+                    value={settings.scrollDelay}
+                    onChange={(e) => setSettings({ ...settings, scrollDelay: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="field">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={settings.stayAtEnd}
+                      onChange={(e) => setSettings({ ...settings, stayAtEnd: e.target.checked })}
+                    />
+                    滚完停在最后一行（不淡出）
+                  </label>
+                </div>
+              </>
+            ) : null}
+
             <div className="field">
               <label>中文字号 <b>{settings.fontSize}</b></label>
               <input

@@ -13,30 +13,60 @@ mod script;
 pub struct Settings {
     pub font_size: u32,
     pub en_size: u32,
+    pub font_family: String,
+    pub fg: String,
+    pub bg_color: String,
+    pub bg_alpha: u32,
+    pub radius: u32,
+    pub padding: u32,
     pub bottom_ratio: f64,
     pub width_ratio: f64,
-    pub bg_alpha: u32,
+    pub lines: u32,
+    pub advance: String, // "scroll" 整段滚动 / "step" 逐条
+    pub scroll_speed: f64,
+    pub scroll_delay: u64,
+    pub stay_at_end: bool,
+    pub layout: String,  // "overlay" 覆盖 / "dock" 贴边
+    pub dock_side: String,
+    pub dock_ratio: f64,
+    pub ppt_resize: bool,
     pub show_en: bool,
     pub click_through: bool,
     pub always_on_top: bool,
     pub screen: String,
     pub follow_ppt: bool,
-    pub align: String,
+    pub minimize_to_tray: bool,
+    pub align: String, // UI 额外项（文字对齐），PRD 5.0 之外
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            font_size: 40,
+            font_size: 36,
             en_size: 24,
-            bottom_ratio: 0.08,
+            font_family: "Microsoft YaHei".into(),
+            fg: "#FFFFFF".into(),
+            bg_color: "#111318".into(),
+            bg_alpha: 235,
+            radius: 14,
+            padding: 18,
+            bottom_ratio: 0.055,
             width_ratio: 0.86,
-            bg_alpha: 232,
+            lines: 1,
+            advance: "scroll".into(),
+            scroll_speed: 0.5,
+            scroll_delay: 1000,
+            stay_at_end: true,
+            layout: "overlay".into(),
+            dock_side: "top".into(),
+            dock_ratio: 0.18,
+            ppt_resize: true,
             show_en: false,
             click_through: true,
             always_on_top: true,
             screen: "auto".into(),
             follow_ppt: true,
+            minimize_to_tray: true,
             align: "center".into(),
         }
     }
@@ -47,16 +77,6 @@ impl Default for Settings {
 pub struct Store {
     pub settings: Settings,
     pub script: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct CuePayload {
-    pub zh: String,
-    pub en: String,
-    pub index: usize,
-    pub total: usize,
-    pub page: u32,
-    pub visible: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -156,9 +176,10 @@ fn target_monitor(
 }
 
 fn overlay_height(settings: &Settings, scale: f64) -> u32 {
-    let base = settings.font_size as f64 * 1.9 + 56.0;
+    let lines = settings.lines.clamp(1, 5) as f64;
+    let base = settings.padding as f64 * 2.0 + lines * settings.font_size as f64 * 1.5;
     let extra = if settings.show_en {
-        settings.en_size as f64 * 1.7
+        settings.en_size as f64 * 1.6
     } else {
         0.0
     };
@@ -270,12 +291,37 @@ fn overlay_visible(app: AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PageCue {
+    pub zh: String,
+    pub en: Option<String>,
+}
+
+/// 把当前页的字幕段推给 overlay（滚动/逐条的播放状态机都在 overlay 里，PRD 6.2）
 #[tauri::command]
-fn push_cue(app: AppHandle, payload: CuePayload) {
+fn push_page(app: AppHandle, page: u32, cues: Vec<PageCue>, settings: Settings) {
     if let Some(win) = app.get_webview_window("overlay") {
-        let _ = win.emit("cue", payload.clone());
+        let payload = serde_json::json!({ "page": page, "cues": cues });
+        let _ = win.emit("page", payload);
+        let _ = win.emit("style", settings);
     }
-    let _ = app.emit("cue-mirror", payload);
+}
+
+/// 主界面按钮 → overlay 控制命令（step ±1 / restart / pause 等）
+#[tauri::command]
+fn send_ctrl(app: AppHandle, kind: String, arg: i32) {
+    if let Some(win) = app.get_webview_window("overlay") {
+        let _ = win.emit("ctrl", serde_json::json!({ "kind": kind, "arg": arg }));
+    }
+}
+
+/// overlay 内容折行超行时自报高度，窗口跟着长（R18，封顶逻辑在 JS 侧）
+#[tauri::command]
+fn set_overlay_height(app: AppHandle, height: u32) {
+    if let Some(win) = app.get_webview_window("overlay") {
+        let w = win.inner_size().map(|s| s.width).unwrap_or(800);
+        let _ = win.set_size(PhysicalSize::new(w, height.clamp(60, 1200)));
+    }
 }
 
 #[tauri::command]
@@ -342,6 +388,13 @@ fn hotkey_specs() -> Vec<(Shortcut, &'static str)> {
         (Shortcut::new(None, Code::F6), "hk:en"),
         (Shortcut::new(Some(ctrl_alt), Code::KeyQ), "hk:quit"),
         (Shortcut::new(Some(ctrl_alt), Code::KeyP), "hk:panel"),
+        (Shortcut::new(Some(ctrl_alt), Code::KeyX), "hk:passthrough"),
+        (Shortcut::new(Some(ctrl_alt), Code::Space), "hk:pause"),
+        (Shortcut::new(Some(ctrl_alt), Code::ArrowUp), "hk:nudge-up"),
+        (Shortcut::new(Some(ctrl_alt), Code::ArrowDown), "hk:nudge-down"),
+        (Shortcut::new(Some(ctrl_alt), Code::ArrowRight), "hk:page-next"),
+        (Shortcut::new(Some(ctrl_alt), Code::ArrowLeft), "hk:page-prev"),
+        (Shortcut::new(Some(ctrl_alt), Code::KeyR), "hk:restart"),
         (Shortcut::new(Some(ctrl_alt), Code::Equal), "hk:font-up"),
         (Shortcut::new(Some(ctrl_alt), Code::Minus), "hk:font-down"),
     ]
@@ -398,7 +451,9 @@ pub fn run() {
             show_overlay,
             hide_overlay,
             overlay_visible,
-            push_cue,
+            push_page,
+            send_ctrl,
+            set_overlay_height,
             push_style,
             apply_style,
             toggle_console,
