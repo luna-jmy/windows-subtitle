@@ -238,8 +238,12 @@ fn sync_window_flags(app: &AppHandle, settings: &Settings) {
 
 /// dev 构建把 WebView2 数据目录指到仓库内（DSH 沙箱拒写 AppData\Local，
 /// 否则 create_dir_all(AppData\...) 直接 os error 5 崩在启动）。
-/// release 在正常机器上跑，保持默认（AppData）。
+/// release 在正常机器上跑，保持默认（AppData）；
+/// 也可用环境变量 DESKTOP_SUBTITLE_DATA_DIR 强制指定（沙箱里测 release 用）。
 fn dev_webview_data_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("DESKTOP_SUBTITLE_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
     #[cfg(debug_assertions)]
     {
         Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.webview2-data"))
