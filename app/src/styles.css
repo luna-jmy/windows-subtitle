@@ -306,12 +306,29 @@ kbd {
   background: #12161d;
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 12px 34px 12px 14px;
   font-size: 12.5px;
   line-height: 1.75;
   color: var(--text);
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
 }
+.fmt-close {
+  position: absolute;
+  top: 30px;
+  right: 10px;
+  z-index: 41;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.fmt-close:hover { background: var(--panel-2); color: var(--text); }
+.fmt-help:not([open]) .fmt-close { display: none; }
 .fmt-help p { margin: 4px 0; }
 .fmt-help b { color: #7fb0ff; }
 

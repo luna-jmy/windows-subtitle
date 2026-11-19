@@ -70,6 +70,26 @@ export default function App() {
     return Array.from(set).sort((a, b) => a - b);
   }, [cues]);
 
+  // ---------- 格式说明浮层：点外部 / Esc 关闭（<details> 原生只能点 summary 收起） ----------
+  const fmtRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = () => {
+      if (fmtRef.current) fmtRef.current.open = false;
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      if (fmtRef.current?.open && !fmtRef.current.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
   // ---------- 初始化 ----------
   useEffect(() => {
     (async () => {
@@ -609,9 +629,18 @@ EN: Optional English line, attached to the Chinese line above
                 <button className="btn ghost mini" onClick={validateDraft}>
                   校验格式
                 </button>
-                <details className="fmt-help">
+                <details className="fmt-help" ref={fmtRef}>
                   <summary>格式说明（无 PPT 也能用）</summary>
                   <div>
+                    <button
+                      className="fmt-close"
+                      title="关闭"
+                      onClick={() => {
+                        if (fmtRef.current) fmtRef.current.open = false;
+                      }}
+                    >
+                      ×
+                    </button>
                     <p>
                       <code>=== 2 ===</code> 表示 PPT 第 2 页；
                       <code>=== 3-5 ===</code> 表示第 3 到 5 页共用同一段字幕。页号从 1 开始。
