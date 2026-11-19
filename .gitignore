@@ -15,3 +15,7 @@ _npmcache/
 # 日志与临时文件
 *.log
 app/imports/
+
+# 个人背景/内部信息，不进 git（仅本地保留）
+PRD.md
+PROGRESS.md
