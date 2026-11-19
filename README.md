@@ -58,7 +58,6 @@ EN: Optional English line（可选，跟在中文条后面）
 
 - [docs/USAGE.md](docs/USAGE.md) — 使用手册：三种工作流、外观设置、字幕条拖动、常见问题
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 架构：三窗模型、数据流、COM 轮询、关键不变量
-- [AGENTS.md](AGENTS.md) — AI 编码代理守则（构建命令、踩坑清单、验证方法）
 
 ## License
 
