@@ -82,6 +82,7 @@ html, body, #root {
   gap: 16px;
   padding: 16px 20px 20px;
   min-height: 0;
+  overflow-y: auto; /* 外观与显示设置超出一屏时可滚动（此前被裁切看不到） */
 }
 
 /* 字幕稿页两行网格：预览卡全宽置顶，编辑器/控制在下排 */

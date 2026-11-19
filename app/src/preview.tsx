@@ -21,6 +21,15 @@ function Preview() {
     return () => un.forEach((f) => f());
   }, []);
 
+  // Esc 关闭排练窗（无边框窗没有关闭按钮）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") invoke("close_preview").catch(() => {});
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -49,7 +58,7 @@ function Preview() {
           <div className="hint">{loading ? "加载中…" : "未导入预览图（先在主界面点「导入 PPT」）"}</div>
         </div>
       )}
-      <div className="badge">预览排练 · P{page} · Ctrl+Alt+←/→ 翻页</div>
+      <div className="badge">预览排练 · P{page} · Ctrl+Alt+←/→ 翻页 · Esc 退出</div>
     </div>
   );
 }

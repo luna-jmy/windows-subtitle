@@ -53,6 +53,7 @@ export default function App() {
   const [slideImg, setSlideImg] = useState<string | null>(null); // 当前页预览图
   const [imgTick, setImgTick] = useState(0); // 导入后刷新预览图
   const [pptImported, setPptImported] = useState(false); // 本次运行是否已导入 PPT（按钮显隐）
+  const [reportedBarH, setReportedBarH] = useState<number | null>(null); // overlay 自报高度（长高后）
   const [stageWrapW, setStageWrapW] = useState(0); // 预览包裹层实测宽（ResizeObserver，跨 tab 用 callback ref 重连）
   const [wrapEl, setWrapEl] = useState<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -228,6 +229,11 @@ export default function App() {
             posX: Math.max(0, Math.min(1, Number(x))),
             posY: Math.max(0, Math.min(1, Number(y))),
           }));
+        }),
+        // overlay 自报长高后的真实高度 → 预览条按同高度画（否则预览是基础高度、实际是长高高度，文字位置对不上）
+        await listen<any>("bar-height", (e) => {
+          const h = Number(e.payload);
+          if (Number.isFinite(h) && h > 0) setReportedBarH(h);
         })
       );
     };
@@ -372,7 +378,12 @@ EN: Optional English line, attached to the Chinese line above
   // 字号等是逻辑像素：真实占屏比例 = 逻辑值×屏scale / 屏物理宽；预览同比例缩放
   const k = stageW > 0 ? (stageW * monScale) / monW : 0.3;
   const barW = settings.widthRatio * stageW;
-  const barH = barContentHeight(settings) * k;
+  // 条高：overlay 在播时用其自报的真实高度（换算到舞台比例），否则用基础公式。
+  // 不然内容折行长高后，真实条与预览条高度不同，文字位置对不上（预览≠播放）
+  const barH =
+    overlayShown && reportedBarH != null
+      ? (reportedBarH * monScale * stageH) / monH
+      : barContentHeight(settings) * k;
   const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
   // 浮层模式的字幕条窗口矩形（= 真实 overlay 窗口在屏上的落位比例）
   const floatRect = (() => {

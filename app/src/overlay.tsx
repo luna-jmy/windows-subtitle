@@ -199,6 +199,8 @@ function Overlay() {
     const cap = Math.round(lineHeight * 5);
     const want = Math.round(Math.max(basis, Math.min(used, cap)) + pad2);
     invoke("set_overlay_height", { height: want }).catch(() => {});
+    // 同步给主界面：预览条按真实（长高后）高度画，保证与实际播放一致
+    emit("bar-height", want).catch(() => {});
   }, [cues, stepIndex, s.fontSize, s.lines, s.padding, s.showEn, s.enSize, lineHeight]);
 
   const empty = cues.length === 0; // 无字幕页：底板保留、文字清空（PRD 边界行为）

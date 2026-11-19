@@ -457,53 +457,63 @@ unsafe fn set_win_rect(h: HWND, x: i32, y: i32, w: i32, hh: i32) { unsafe {
     let _ = SetWindowPos(h, None, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
 }}
 
-/// 应用布局：dock＝缩目标窗（放映窗优先，其次预览窗）让位 + overlay 贴边整条；
+/// 应用布局：dock＝目标窗（放映窗优先，其次排练窗；都没有则桌面即舞台）让位 + overlay 贴边整条；
 /// 切回 overlay＝把目标窗恢复全屏。返回字幕条新矩形（物理像素）。
+/// 注意：无目标窗（无 PPT、未开排练窗）也要返回贴边矩形——贴边是字幕条自身的布局，
+/// 不能因为没有可缩的窗就不生效（2026-11-19 修：此前无 PPT 时贴边完全失效）。
 pub fn apply_dock(app: &tauri::AppHandle, settings: &crate::Settings) -> Option<(i32, i32, i32, i32)> {
     use tauri::Manager;
     let mon: (i32, i32, i32, i32);
-    let target: HWND;
+    let target: Option<HWND>;
 
     if let (Some(rect), Some(h)) = (find_show_monitor(), find_hwnd("screenClass")) {
         mon = (rect.x, rect.y, rect.w, rect.h);
-        target = h;
+        target = Some(h);
     } else if let Some(pw) = app.get_webview_window("preview") {
         let m = pw.current_monitor().ok().flatten()?;
         let p = m.position();
         let s = m.size();
         mon = (p.x, p.y, s.width as i32, s.height as i32);
-        target = pw.hwnd().ok()?;
+        target = pw.hwnd().ok();
     } else {
-        return None;
+        let m = crate::target_monitor(app, settings)?;
+        let p = m.position();
+        let s = m.size();
+        mon = (p.x, p.y, s.width as i32, s.height as i32);
+        target = None;
     }
 
-    unsafe {
-        if settings.layout == "dock" && settings.ppt_resize {
-            // 记住目标窗原矩形，切回覆盖模式时恢复
-            {
-                let mut rest = DOCK_RESTORE.lock().unwrap();
-                if rest.is_none() || rest.unwrap().0 != target.0 as isize {
-                    let mut r = RECT::default();
-                    if GetWindowRect(target, &mut r).is_ok() {
-                        *rest = Some((target.0 as isize, r.left, r.top, r.right - r.left, r.bottom - r.top));
-                    }
-                }
-            }
-            let (t, bar) = dock_geometry(mon, &settings.dock_side, settings.dock_ratio);
-            set_win_rect(target, t.0, t.1, t.2, t.3);
-            Some(bar)
-        } else {
-            // 覆盖布局：恢复目标窗全屏
+    if settings.layout != "dock" {
+        // 覆盖布局：恢复目标窗全屏
+        if let Some(t) = target {
             let mut rest = DOCK_RESTORE.lock().unwrap();
             if let Some((h, x, y, w, hh)) = *rest {
-                if h == target.0 as isize {
-                    set_win_rect(target, x, y, w, hh);
+                if h == t.0 as isize {
+                    unsafe { set_win_rect(t, x, y, w, hh) };
                     *rest = None;
                 }
             }
-            None
+        }
+        return None;
+    }
+
+    let (target_rect, bar) = dock_geometry(mon, &settings.dock_side, settings.dock_ratio);
+    if let Some(t) = target {
+        if settings.ppt_resize {
+            // 记住目标窗原矩形（换目标时重记），缩窗让位；ppt_resize 关掉时只贴条不缩窗
+            {
+                let mut rest = DOCK_RESTORE.lock().unwrap();
+                if rest.is_none() || rest.unwrap().0 != t.0 as isize {
+                    let mut r = RECT::default();
+                    if unsafe { GetWindowRect(t, &mut r) }.is_ok() {
+                        *rest = Some((t.0 as isize, r.left, r.top, r.right - r.left, r.bottom - r.top));
+                    }
+                }
+            }
+            unsafe { set_win_rect(t, target_rect.0, target_rect.1, target_rect.2, target_rect.3) };
         }
     }
+    Some(bar)
 }
 
 /// 读放映状态：SlideShowWindows(1).View.Slide.SlideIndex

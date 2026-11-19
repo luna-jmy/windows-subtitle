@@ -270,7 +270,7 @@ async fn read_preview_image(app: AppHandle, page: u32) -> Option<String> {
 
 // ---------------------------------------------------------------- 浮层窗口
 
-fn target_monitor(
+pub(crate) fn target_monitor(
     app: &AppHandle,
     settings: &Settings,
 ) -> Option<tauri::Monitor> {
